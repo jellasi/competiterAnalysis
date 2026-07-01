@@ -47,7 +47,7 @@ jobs:
           if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then
             FORCE="--force-notify"
           fi
-          python monitor.py --notify --notify-on-errors $FORCE
+          python monitor.py --notify $FORCE
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4

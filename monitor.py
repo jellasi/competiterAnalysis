@@ -121,6 +121,18 @@ def extract_title(raw: str) -> str:
     return ""
 
 
+def extract_meta_content(raw: str, name: str) -> str:
+    patterns = [
+        rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+    ]
+    for pat in patterns:
+        m = re.search(pat, raw, flags=re.I | re.S)
+        if m:
+            return clean_spaces(html.unescape(m.group(1)))
+    return ""
+
+
 def strip_tags(raw: str) -> str:
     raw = re.sub(r"(?is)<(script|style|noscript|svg|canvas|iframe).*?</\1>", " ", raw)
     raw = re.sub(r"(?is)<!--.*?-->", " ", raw)
@@ -161,12 +173,62 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def extract_google_play_summary(raw: str) -> tuple[str, dict[str, Any]]:
+    """Return a stable subset of a Google Play app page.
+
+    Full Play Store pages include rotating reviews/recommendations. Those create
+    false weekly alerts, so keep only app-level fields useful for update checks.
+    """
+    title = extract_title(raw)
+    description = extract_meta_content(raw, "description")
+    text = clean_spaces(strip_tags(raw))
+    lines = text.splitlines()
+
+    keep: list[str] = []
+    labels = {
+        "새로운 기능",
+        "업데이트 날짜",
+        "버전",
+        "필요한 Android 버전",
+        "다운로드",
+        "콘텐츠 등급",
+        "제공자",
+        "개발자",
+        "개인정보처리방침",
+    }
+    stop_markers = {"리뷰", "리뷰 모두 보기", "앱 정보", "데이터 보안", "평점 및 리뷰"}
+    for i, line in enumerate(lines):
+        if line in labels:
+            keep.append(line)
+            for nxt in lines[i + 1 : i + 5]:
+                if nxt in labels or nxt in stop_markers:
+                    break
+                keep.append(nxt)
+
+    summary_lines = [f"title: {title}"] if title else []
+    if description:
+        summary_lines.append(f"description: {description}")
+    summary_lines.extend(keep)
+    summary = clean_spaces("\n".join(summary_lines))
+    metadata = {
+        "content_type": "google_play_summary",
+        "title": title,
+        "description": description,
+    }
+    return summary, metadata
+
+
 def fetch_webpage(company: str, source: dict[str, Any]) -> Fetched:
     url = source["url"]
     try:
         raw, content_type = http_get(url)
         title = extract_title(raw)
-        text = clean_spaces(strip_tags(raw))
+        if "play.google.com/store/apps/details" in url:
+            text, metadata = extract_google_play_summary(raw)
+            metadata["length"] = len(raw)
+        else:
+            text = clean_spaces(strip_tags(raw))
+            metadata = {"content_type": content_type, "length": len(raw)}
         normalized = normalize_text(text)
         return Fetched(
             ok=True,
@@ -179,7 +241,7 @@ def fetch_webpage(company: str, source: dict[str, Any]) -> Fetched:
             text=text[:20000],
             normalized_text=normalized[:40000],
             digest=digest(normalized),
-            metadata={"content_type": content_type, "length": len(raw)},
+            metadata=metadata,
         )
     except (HTTPError, URLError, TimeoutError, OSError) as e:
         return Fetched(False, source["id"], company, source["label"], source.get("importance", "medium"), url, error=repr(e))
@@ -220,6 +282,38 @@ def fetch_appstore(company: str, source: dict[str, Any]) -> Fetched:
         return Fetched(False, source["id"], company, source["label"], source.get("importance", "medium"), url, error=repr(e))
 
 
+def fetch_zendesk_articles(company: str, source: dict[str, Any]) -> Fetched:
+    url = source["url"]
+    try:
+        raw, _ = http_get(url)
+        data = json.loads(raw)
+        articles = data.get("articles") or []
+        rows: list[str] = []
+        for article in articles[: int(source.get("limit", 30))]:
+            title = article.get("title") or ""
+            updated_at = article.get("updated_at") or article.get("created_at") or ""
+            html_url = article.get("html_url") or ""
+            body = clean_spaces(strip_tags(article.get("body") or ""))
+            rows.append(f"title: {title}\nupdated_at: {updated_at}\nurl: {html_url}\nbody: {body[:1200]}")
+        text = "\n\n---\n\n".join(rows)
+        normalized = normalize_text(text)
+        return Fetched(
+            ok=True,
+            source_id=source["id"],
+            company=company,
+            label=source["label"],
+            importance=source.get("importance", "high"),
+            url=url,
+            title=source["label"],
+            text=text,
+            normalized_text=normalized,
+            digest=digest(normalized),
+            metadata={"content_type": "zendesk_articles", "count": len(articles)},
+        )
+    except Exception as e:  # noqa: BLE001 - keep monitor resilient
+        return Fetched(False, source["id"], company, source["label"], source.get("importance", "high"), url, error=repr(e))
+
+
 def fetch_all(config: dict[str, Any]) -> list[Fetched]:
     fetched: list[Fetched] = []
     for company_cfg in config["companies"]:
@@ -229,6 +323,8 @@ def fetch_all(config: dict[str, Any]) -> list[Fetched]:
                 item = fetch_webpage(company, source)
             elif source["type"] == "appstore_lookup":
                 item = fetch_appstore(company, source)
+            elif source["type"] == "zendesk_articles":
+                item = fetch_zendesk_articles(company, source)
             else:
                 item = Fetched(False, source["id"], company, source["label"], source.get("importance", "medium"), source.get("url", ""), error=f"unknown source type: {source['type']}")
             fetched.append(item)
@@ -398,15 +494,15 @@ def send_slack(report: str) -> None:
 
 def send_email(report: str) -> None:
     host = os.getenv("SMTP_HOST", "").strip()
-    port = int(os.getenv("SMTP_PORT", "587"))
     username = os.getenv("SMTP_USERNAME", "").strip()
     password = os.getenv("SMTP_PASSWORD", "")
     mail_from = os.getenv("EMAIL_FROM", username).strip()
     mail_to = os.getenv("EMAIL_TO", "").strip()
-    use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
     if not host or not mail_to or not mail_from:
         print("SMTP_HOST/EMAIL_TO/EMAIL_FROM not fully set; skip email notification")
         return
+    port = int(os.getenv("SMTP_PORT") or "587")
+    use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
 
     msg = EmailMessage()
     msg["Subject"] = "[세이브택스] 경쟁사 변경 모니터링 알림"

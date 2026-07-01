@@ -12,10 +12,11 @@
         },
         {
           "id": "3o3_notice",
-          "type": "webpage",
+          "type": "zendesk_articles",
           "label": "공지사항/약관 개정 안내",
-          "url": "https://help.3o3.co.kr/hc/ko/categories/900000268066-%EA%B3%B5%EC%A7%80%EC%82%AC%ED%95%AD",
-          "importance": "high"
+          "url": "https://help.3o3.co.kr/api/v2/help_center/ko/categories/900000268066/articles.json",
+          "importance": "high",
+          "limit": 30
         },
         {
           "id": "3o3_terms",
@@ -94,10 +95,11 @@
         },
         {
           "id": "bznav_help",
-          "type": "webpage",
+          "type": "zendesk_articles",
           "label": "고객센터/공지/약관",
-          "url": "https://help.bznav.com/hc/ko",
-          "importance": "high"
+          "url": "https://help.bznav.com/api/v2/help_center/ko/articles.json",
+          "importance": "high",
+          "limit": 30
         },
         {
           "id": "bznav_google_play",
@@ -118,7 +120,29 @@
     }
   ],
   "keywords": {
-    "high": ["약관", "개인정보", "처리방침", "환불", "수수료", "서비스 종료", "중단", "개정", "공지", "보안", "세무대리"],
-    "medium": ["업데이트", "신규", "출시", "개선", "혜택", "환급", "이벤트", "프로모션", "버전"]
+    "high": [
+      "약관",
+      "개인정보",
+      "처리방침",
+      "환불",
+      "수수료",
+      "서비스 종료",
+      "중단",
+      "개정",
+      "공지",
+      "보안",
+      "세무대리"
+    ],
+    "medium": [
+      "업데이트",
+      "신규",
+      "출시",
+      "개선",
+      "혜택",
+      "환급",
+      "이벤트",
+      "프로모션",
+      "버전"
+    ]
   }
 }
