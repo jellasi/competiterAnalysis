@@ -51,15 +51,16 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO || 'minseok.cho@unitblack.co.kr,jellasi@naver.com' }}
         run: |
-          FORCE=""
-          if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then
-            FORCE="--force-notify"
+          PERIOD_FROM="${{ github.event.inputs.period_from }}"
+          PERIOD_TO="${{ github.event.inputs.period_to }}"
+
+          # 기본값: KST 기준 지난 7일(전주 월요일~일요일)을 주간 요약 리포트로 발송
+          if [ -z "$PERIOD_FROM" ] || [ -z "$PERIOD_TO" ]; then
+            PERIOD_TO=$(TZ=Asia/Seoul date -d "yesterday" +%F)
+            PERIOD_FROM=$(TZ=Asia/Seoul date -d "$PERIOD_TO -6 days" +%F)
           fi
-          if [ -n "${{ github.event.inputs.period_from }}" ] && [ -n "${{ github.event.inputs.period_to }}" ]; then
-            python monitor.py --notify --period-from "${{ github.event.inputs.period_from }}" --period-to "${{ github.event.inputs.period_to }}"
-          else
-            python monitor.py --notify $FORCE
-          fi
+
+          python monitor.py --notify --period-from "$PERIOD_FROM" --period-to "$PERIOD_TO"
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
@@ -67,13 +68,14 @@ jobs:
           name: competitor-monitor-report
           path: |
             last_report.md
+            last_slack_message.txt
             state/competitor_state.json
 
       - name: Commit updated state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/competitor_state.json last_report.md
+          git add state/competitor_state.json last_report.md last_slack_message.txt
           if git diff --cached --quiet; then
             echo "No state/report changes to commit"
           else

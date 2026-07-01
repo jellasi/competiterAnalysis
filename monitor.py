@@ -196,7 +196,7 @@ def extract_google_play_summary(raw: str) -> tuple[str, dict[str, Any]]:
         "개발자",
         "개인정보처리방침",
     }
-    stop_markers = {"리뷰", "리뷰 모두 보기", "앱 정보", "데이터 보안", "평점 및 리뷰"}
+    stop_markers = {"리뷰", "리뷰 모두 보기", "앱 정보", "데이터 보안", "평점 및 리뷰", "flag 부적절한 앱으로 신고", "개발자", "google store", "모두 vat 포함된 가격입니다.", "대한민국 (한국어)"}
     for i, line in enumerate(lines):
         if line in labels:
             keep.append(line)
@@ -480,11 +480,10 @@ def send_slack(report: str) -> None:
     if not webhook:
         print("SLACK_WEBHOOK_URL not set; skip Slack notification")
         return
-    title = "세이브택스 경쟁사 변경 모니터링"
     text = report
     if len(text) > 3500:
         text = text[:3500] + "\n...보고서가 길어 일부 생략되었습니다. GitHub Actions artifact/last_report.md를 확인하세요."
-    payload = json.dumps({"text": f"*{title}*\n```{text}```"}).encode("utf-8")
+    payload = json.dumps({"text": text}).encode("utf-8")
     req = Request(webhook, data=payload, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT}, method="POST")
     with urlopen(req, timeout=20) as resp:
         if resp.status >= 300:
@@ -611,11 +610,16 @@ def collect_google_play_period(company: str, source: dict[str, Any], start: date
     lines = item.normalized_text.splitlines()
     update_date = None
     release_notes = []
+    stop_markers = {"flag 부적절한 앱으로 신고", "개발자", "google store", "모두 vat 포함된 가격입니다.", "대한민국 (한국어)", "앱 지원", "개발자 소개"}
     for idx, line in enumerate(lines):
         if line == "업데이트 날짜" and idx + 1 < len(lines):
             update_date = parse_korean_date_line(lines[idx + 1])
         if line == "새로운 기능":
-            release_notes = lines[idx + 1: idx + 8]
+            release_notes = []
+            for nxt in lines[idx + 1: idx + 12]:
+                if nxt in stop_markers:
+                    break
+                release_notes.append(nxt)
     if not in_period(update_date, start, end_exclusive):
         return []
     return [{
@@ -629,7 +633,85 @@ def collect_google_play_period(company: str, source: dict[str, Any], start: date
     }]
 
 
-def build_period_report(config: dict[str, Any], date_from: str, date_to: str) -> str:
+def report_url() -> str:
+    explicit = os.getenv("REPORT_URL", "").strip()
+    if explicit:
+        return explicit
+    server = os.getenv("GITHUB_SERVER_URL", "https://github.com").strip()
+    repo = os.getenv("GITHUB_REPOSITORY", "jellasi/competiterAnalysis").strip()
+    run_id = os.getenv("GITHUB_RUN_ID", "").strip()
+    if run_id:
+        return f"{server}/{repo}/actions/runs/{run_id}"
+    return f"{server}/{repo}/actions"
+
+
+def row_text(row: dict[str, Any]) -> str:
+    return " ".join(str(row.get(k, "")) for k in ["kind", "title", "summary", "source"])
+
+
+def classify_ci_row(row: dict[str, Any]) -> tuple[str, str]:
+    text = row_text(row).lower()
+    if "app store" in text or "google play" in text or "앱 업데이트" in text:
+        category = "제품"
+    elif any(k in text for k in ["프로모션", "이벤트", "캠페인"]):
+        category = "프로모션"
+    elif any(k in text for k in ["세무조사", "종합소득세", "간이과세", "세금", "환급 사례", "콘텐츠", "신고"]):
+        category = "마케팅"
+    elif any(k in text for k in ["약관", "개인정보", "처리방침", "환불", "수수료"]):
+        category = "기타"
+    else:
+        category = "기타"
+
+    # HIGH is reserved for direct pricing/revenue/customer-churn/core-position impact.
+    if any(k in text for k in ["서비스 종료", "서비스 중단", "수수료 변경", "가격 변경", "환불 정책"]):
+        severity = "HIGH"
+    elif any(k in text for k in ["개인정보", "처리방침", "약관", "서비스 확대", "제3자"]) or ("전체" in text and "탭" in text):
+        severity = "MEDIUM"
+    elif "앱 업데이트" in text and any(k in text for k in ["사용성", "오류", "버그", "개선"]):
+        severity = "LOW"
+    elif category == "마케팅":
+        severity = "LOW"
+    else:
+        severity = "LOW"
+    return category, severity
+
+def impact_for(row: dict[str, Any], category: str, severity: str) -> str:
+    text = row_text(row)
+    if "개인정보" in text or "처리방침" in text or "제3자" in text:
+        return "개인정보 제공/활용 범위 변화는 환급 서비스 신뢰도와 동의 UX에 영향을 줄 수 있어 약관·동의 플로우 비교 확인이 필요합니다."
+    if "전체" in text and "탭" in text:
+        return "앱 내 서비스 탐색 구조를 넓히는 변화로, 환급 외 부가 서비스 노출·교차판매 UX 강화 가능성이 있습니다."
+    if "사용성" in text or "오류" in text or "버그" in text:
+        return "직접적인 포지션 변화는 제한적이나, 신청/조회 과정의 이탈률 개선 경쟁으로 이어질 수 있습니다."
+    if category == "마케팅":
+        return "세무 정보성 콘텐츠를 통한 SEO/신뢰 확보 활동으로 보이며, 즉각적 기능 변화보다는 상단 퍼널 유입 경쟁 측면에서 참고가 필요합니다."
+    return "우리 서비스에 대한 직접 영향은 현재 데이터만으로 확인 필요합니다."
+
+
+def action_for(row: dict[str, Any], category: str, severity: str) -> str:
+    text = row_text(row)
+    if "개인정보" in text or "처리방침" in text or "제3자" in text:
+        return "삼쩜삼 개인정보 처리방침 개정 전후 조항을 비교하고, 세이브택스 환급의 개인정보 동의·제3자 제공 고지와 차이를 점검합니다."
+    if "전체" in text and "탭" in text:
+        return "비즈넵 앱의 신규 정보구조를 실제 앱 화면 기준으로 확인하고, 환급 외 부가 서비스 노출 방식과 온보딩 흐름을 캡처합니다."
+    if "사용성" in text or "오류" in text or "버그" in text:
+        return "덧셈/비즈넵의 최신 앱 버전을 설치해 환급 조회·신청 핵심 플로우의 단계 수와 이탈 지점을 비교합니다."
+    if category == "마케팅":
+        return "동일 키워드군의 검색 노출 현황을 확인하고, 세이브택스 콘텐츠/랜딩에서 보강할 주제를 선별합니다."
+    return "변화의 실제 서비스 영향 여부를 추가 확인합니다."
+
+
+def previous_change_text(row: dict[str, Any]) -> str:
+    if row.get("kind", "").endswith("앱 업데이트") or "앱 업데이트" in row.get("kind", ""):
+        return "해당 기간 내 앱 버전/릴리즈노트 업데이트로 확인. 직전 버전 대비 상세 화면 변화는 확인 필요."
+    return "해당 기간 내 게시글 신규/수정으로 확인. 이전 리포트와의 신규/변경/지속 이슈 구분은 이전 리포트 데이터 확인 필요."
+
+
+def evidence_line(row: dict[str, Any], check_date: str) -> str:
+    return f"{row.get('url')} (확인일: {check_date})"
+
+
+def build_competitor_data(config: dict[str, Any], date_from: str, date_to: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     start = parse_date_start(date_from)
     end_exclusive = parse_date_end_exclusive(date_to)
     rows: list[dict[str, Any]] = []
@@ -640,42 +722,196 @@ def build_period_report(config: dict[str, Any], date_from: str, date_to: str) ->
         company = company_cfg["name"]
         for source in company_cfg["sources"]:
             try:
+                collected: list[dict[str, Any]] = []
                 if source["type"] == "zendesk_articles":
-                    rows.extend(collect_zendesk_period(company, source, start, end_exclusive))
+                    collected = collect_zendesk_period(company, source, start, end_exclusive)
                 elif source["type"] == "appstore_lookup":
-                    rows.extend(collect_appstore_period(company, source, start, end_exclusive))
+                    collected = collect_appstore_period(company, source, start, end_exclusive)
                 elif source["type"] == "webpage" and "play.google.com/store/apps/details" in source.get("url", ""):
-                    rows.extend(collect_google_play_period(company, source, start, end_exclusive))
+                    collected = collect_google_play_period(company, source, start, end_exclusive)
                 else:
                     skipped.append(f"{company} / {source['label']}: 날짜 필터 가능한 공개 메타데이터가 없어 정기 스냅샷 비교 대상")
+                for row in collected:
+                    category, severity = classify_ci_row(row)
+                    row["category"] = category
+                    row["severity"] = severity
+                    rows.append(row)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{company} / {source['label']}: {e!r}")
 
     rows.sort(key=lambda r: (r.get("date", ""), r.get("company", ""), r.get("source", "")))
-    lines = [
-        "# 세이브택스 환급 경쟁사 기간 데이터 리포트",
+    return rows, skipped, errors
+
+
+def merge_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    title = re.sub(r"\s+", " ", row.get("title", "")).strip().lower()
+    return (row.get("company", ""), row.get("category", ""), title)
+
+
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = merge_key(row)
+        if key not in seen:
+            seen[key] = row
+            continue
+        # Merge source URLs if duplicated across App Store / Play Store etc.
+        existing = seen[key]
+        if row.get("url") and row["url"] not in existing.get("url", ""):
+            existing["url"] = existing.get("url", "") + " / " + row["url"]
+    return list(seen.values())
+
+
+def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge repeated low-level content updates into one competitor-level item."""
+    deduped = dedupe_rows(rows)
+    marketing_groups: dict[str, list[dict[str, Any]]] = {}
+    others: list[dict[str, Any]] = []
+    for row in deduped:
+        if row.get("category") == "마케팅" and row.get("company") == "비즈넵 환급":
+            marketing_groups.setdefault(row["company"], []).append(row)
+        else:
+            others.append(row)
+
+    for company, group in marketing_groups.items():
+        if len(group) == 1:
+            others.extend(group)
+            continue
+        group.sort(key=lambda r: r.get("date", ""))
+        titles = [r.get("title", "") for r in group]
+        urls = [r.get("url", "") for r in group if r.get("url")]
+        others.append({
+            "company": company,
+            "source": "고객센터/공지/약관",
+            "kind": "세무 정보성 콘텐츠 업데이트",
+            "date": group[0].get("date", ""),
+            "title": f"세무 정보성 콘텐츠 {len(group)}건 업데이트",
+            "url": " / ".join(urls[:5]),
+            "summary": "업데이트 제목: " + "; ".join(titles),
+            "category": "마케팅",
+            "severity": "LOW",
+        })
+    return others
+
+
+def executive_summary(rows: list[dict[str, Any]], competitors: list[str]) -> list[str]:
+    if not rows:
+        return ["이번 기간 확인된 주요 변화는 없습니다."]
+    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    top = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("date", "")))[:3]
+    bullets = []
+    for row in top:
+        why = impact_for(row, row.get("category", "기타"), row.get("severity", "LOW"))
+        bullets.append(f"{row['company']}에서 {row['title']} 변화가 확인되었습니다. 중요도는 {row['severity']}이며, 우리에게 중요한 이유는 {why}")
+    active = sorted({r["company"] for r in rows})
+    quiet = [c for c in competitors if c not in active]
+    if quiet:
+        bullets.append(f"{', '.join(quiet)}는 날짜 메타데이터 기준 주요 업데이트가 확인되지 않았습니다. 억지 인사이트 없이 지속 모니터링합니다.")
+    return bullets[:3]
+
+
+def build_detailed_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors: list[str], date_from: str, date_to: str) -> str:
+    period = f"{date_from} ~ {date_to}"
+    check_date = datetime.now(timezone.utc).date().isoformat()
+    competitors = ["삼쩜삼", "덧셈컴퍼니", "비즈넵 환급"]
+    our_company = "세이브택스 환급"
+    focus = "앱 서비스 업데이트, 주요 홈페이지 변경, 약관/공지 변경"
+    url = report_url()
+    rows = aggregate_rows(rows)
+
+    lines: list[str] = [
+        f"# {period} 경쟁사 동향 리포트",
         "",
-        f"- 대상 기간: {date_from} ~ {date_to} (KST/UTC 날짜 기준 혼합 소스, 종료일 포함)",
-        f"- 수집 항목: {len(rows)}건",
-        f"- 생성 시각: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        "## 리포트 정보",
+        f"- 리포트 기간: {period}",
+        f"- 작성 기준일: {check_date}",
+        f"- 분석 대상 경쟁사: {', '.join(competitors)}",
+        f"- 우리 회사/서비스: {our_company}",
+        f"- 주요 관심 영역: {focus}",
+        "- 이전 리포트: 확인 필요",
+        f"- 상세 리포트 URL: {url}",
         "",
+        "## 1. Executive Summary",
     ]
-    if rows:
-        lines += ["## 기간 내 확인된 업데이트", ""]
-        for row in rows:
-            lines += [
-                f"### {row['company']} - {row['kind']}",
-                "",
-                f"- 소스: {row['source']}",
-                f"- 일시: {row['date']}",
-                f"- 제목: {row['title']}",
-                f"- URL: {row['url']}",
-            ]
-            if row.get("summary"):
-                lines += [f"- 요약: {row['summary']}"]
-            lines.append("")
+    for bullet in executive_summary(rows, competitors):
+        lines.append(f"- {bullet}")
+    lines += ["", "## 2. 주요 변화"]
+
+    if not rows:
+        lines += ["- 이번 기간 입력 데이터 기준 주요 변화가 확인되지 않았습니다.", ""]
     else:
-        lines += ["## 기간 내 확인된 업데이트", "", "해당 기간에 날짜 메타데이터 기준으로 확인된 업데이트가 없습니다.", ""]
+        severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+        for row in sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("company", ""), r.get("date", ""))):
+            category = row.get("category", "기타")
+            severity = row.get("severity", "LOW")
+            lines += [
+                f"### [{row['company']}] {row['title']}",
+                f"- 구분: {category}",
+                f"- 중요도: {severity}",
+                f"- 확인된 사실: {row['kind']}가 확인되었습니다. {row.get('summary') or '세부 내용은 출처 확인 필요'}",
+                f"- 이전 대비 변화: {previous_change_text(row)}",
+                f"- 우리에게 미치는 영향: {impact_for(row, category, severity)}",
+                f"- 권장 대응: {action_for(row, category, severity)}",
+                f"- 출처: {evidence_line(row, check_date)}",
+                f"- 확인일: {check_date}",
+                "",
+            ]
+
+    lines += ["## 3. 경쟁사별 상세 분석"]
+    for comp in competitors:
+        comp_rows = [r for r in rows if r.get("company") == comp]
+        lines += ["", f"### {comp}"]
+        if not comp_rows:
+            lines.append("- 주요 활동: 이번 기간 날짜 메타데이터 기준 신규/변경 활동 확인 없음.")
+            lines.append("- 방향성: 확인 필요.")
+            lines.append("- 반복 패턴: 확인 필요.")
+            continue
+        cats = sorted({r.get("category", "기타") for r in comp_rows})
+        lines.append(f"- 주요 활동: {len(comp_rows)}건 확인 ({', '.join(cats)}).")
+        if any("앱 업데이트" in r.get("kind", "") for r in comp_rows):
+            lines.append("- 방향성: 앱 사용성 또는 정보구조 개선 활동이 관찰됨.")
+        elif any(r.get("category") == "마케팅" for r in comp_rows):
+            lines.append("- 방향성: 세무 정보성 콘텐츠를 통한 유입/신뢰 확보 활동이 관찰됨.")
+        else:
+            lines.append("- 방향성: 확인 필요.")
+        pattern_titles = "; ".join(r["title"] for r in comp_rows[:3])
+        lines.append(f"- 반복 패턴: {pattern_titles}")
+
+    lines += ["", "## 4. 시사점"]
+    if rows:
+        lines += [
+            "- 기회 요인: 경쟁사의 약관/앱 UX/콘텐츠 변화를 기준으로 세이브택스 환급의 신뢰 고지, 신청 UX, 정보성 콘텐츠 차별화 포인트를 점검할 수 있습니다.",
+            "- 위협 요인: 앱 정보구조 개선과 세무 콘텐츠 확장은 환급 서비스 탐색성·상단 퍼널 경쟁을 강화할 수 있습니다.",
+            "- 추가 확인이 필요한 사항: 실제 앱 화면 변화, 약관 개정 전후 조항, 홈페이지/약관 정적 페이지의 문구 변경 여부는 추가 수동 확인이 필요합니다.",
+        ]
+    else:
+        lines += [
+            "- 기회 요인: 확인 필요.",
+            "- 위협 요인: 확인된 주요 변화 없음.",
+            "- 추가 확인이 필요한 사항: 날짜 메타데이터가 없는 홈페이지/약관 페이지는 정기 스냅샷 비교로 보완 필요.",
+        ]
+
+    actions: list[tuple[str, str, str, str, str]] = []
+    if any("개인정보" in row_text(r) or "처리방침" in row_text(r) for r in rows):
+        actions.append(("삼쩜삼 개인정보 처리방침 개정 조항 비교", "동의/제3자 제공 고지 경쟁 수준 파악", "HIGH", "Product/Legal", "1주 이내"))
+    if any("앱 업데이트" in r.get("kind", "") for r in rows):
+        actions.append(("경쟁사 최신 앱 플로우 캡처", "환급 조회·신청 UX 차이 확인", "MEDIUM", "Product/Design", "1주 이내"))
+    if any(r.get("category") == "마케팅" for r in rows):
+        actions.append(("세무 정보성 콘텐츠 키워드 비교", "SEO/랜딩 콘텐츠 보강 주제 도출", "MEDIUM", "Marketing/Growth", "2주 이내"))
+    if not actions:
+        actions.append(("정기 모니터링 유지", "의미 있는 변화 발생 시 대응", "LOW", "Growth", "다음 정기 리포트"))
+
+    lines += ["", "## 5. 권장 액션"]
+    for idx, (item, purpose, priority, owner, due) in enumerate(actions, start=1):
+        lines += [
+            f"### {idx}. {item}",
+            f"- 실행 항목: {item}",
+            f"- 실행 목적: {purpose}",
+            f"- 우선순위: {priority}",
+            f"- 권장 담당 조직: {owner}",
+            f"- 권장 완료 시점: {due}",
+            "",
+        ]
 
     if skipped:
         lines += ["## 참고: 날짜 필터 미지원 소스", ""]
@@ -687,6 +923,42 @@ def build_period_report(config: dict[str, Any], date_from: str, date_to: str) ->
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
+
+def build_slack_ci_message(rows: list[dict[str, Any]], date_from: str, date_to: str) -> str:
+    rows = aggregate_rows(rows)
+    period = f"{date_from}~{date_to}"
+    url = report_url()
+    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    top = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("date", "")))[:3]
+    lines = [f"📊 {period} 경쟁사 주간 요약"]
+    if not top:
+        lines.append("주요 변화: 입력 데이터 기준 확인된 주요 변화 없음")
+    for row in top:
+        icon = "🚨 " if row.get("severity") == "HIGH" else ""
+        why = impact_for(row, row.get("category", "기타"), row.get("severity", "LOW"))
+        why = textwrap.shorten(why, width=90, placeholder="...")
+        change = textwrap.shorten(row.get("title", ""), width=80, placeholder="...")
+        lines.append(f"- {icon}[{row.get('severity','LOW')}] {row['company']}: {change} → {why}")
+
+    actions = []
+    if any("개인정보" in row_text(r) or "처리방침" in row_text(r) for r in rows):
+        actions.append("삼쩜삼 개인정보 처리방침 개정 전후 비교")
+    if any("앱 업데이트" in r.get("kind", "") for r in rows):
+        actions.append("경쟁사 최신 앱 플로우 캡처/비교")
+    if any(r.get("category") == "마케팅" for r in rows):
+        actions.append("세무 콘텐츠 키워드·랜딩 보강점 확인")
+    if actions:
+        lines.append("권장 액션: " + " / ".join(actions[:3]))
+    lines.append(f"상세 리포트: {url}")
+    msg = "\n".join(lines)
+    if len(msg) > 1200:
+        msg = msg[:1160].rstrip() + f"...\n상세 리포트: {url}"
+    return msg
+
+
+def build_period_report(config: dict[str, Any], date_from: str, date_to: str) -> str:
+    rows, skipped, errors = build_competitor_data(config, date_from, date_to)
+    return build_detailed_ci_report(rows, skipped, errors, date_from, date_to)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Monitor SaveTax refund competitors and notify changes.")
@@ -706,11 +978,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.period_from or args.period_to:
         if not (args.period_from and args.period_to):
             raise SystemExit("--period-from and --period-to must be used together")
-        report = build_period_report(config, args.period_from, args.period_to)
+        rows, skipped, errors = build_competitor_data(config, args.period_from, args.period_to)
+        report = build_detailed_ci_report(rows, skipped, errors, args.period_from, args.period_to)
+        slack_message = build_slack_ci_message(rows, args.period_from, args.period_to)
         args.report.write_text(report, encoding="utf-8")
+        (args.report.parent / "last_slack_message.txt").write_text(slack_message + "\n", encoding="utf-8")
         print(report)
+        print("\n--- Slack message preview ---\n" + slack_message)
         if args.notify:
-            send_slack(report)
+            send_slack(slack_message)
             send_email(report)
         else:
             print("No notification sent")
