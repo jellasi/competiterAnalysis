@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "sources.json"
 DEFAULT_STATE = ROOT / "state" / "competitor_state.json"
 DEFAULT_REPORT = ROOT / "last_report.md"
+DEFAULT_HTML_REPORT = ROOT / "last_report.html"
+DEFAULT_SLACK_REPORT = ROOT / "last_slack_message.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -521,7 +523,7 @@ def send_slack(report: str) -> None:
     print("SLACK_BOT_TOKEN/SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL not set; skip Slack notification")
 
 
-def send_email(report: str) -> None:
+def send_email(report: str, html_report: str | None = None) -> None:
     host = os.getenv("SMTP_HOST", "").strip()
     username = os.getenv("SMTP_USERNAME", "").strip()
     password = os.getenv("SMTP_PASSWORD", "")
@@ -538,6 +540,8 @@ def send_email(report: str) -> None:
     msg["From"] = mail_from
     msg["To"] = mail_to
     msg.set_content(report)
+    if html_report:
+        msg.add_alternative(html_report, subtype="html")
 
     if use_ssl:
         with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=30) as smtp:
@@ -673,6 +677,16 @@ def report_url() -> str:
     if run_id:
         return f"{server}/{repo}/actions/runs/{run_id}"
     return f"{server}/{repo}/actions"
+
+
+def html_report_url() -> str:
+    explicit = os.getenv("HTML_REPORT_URL", "").strip()
+    if explicit:
+        return explicit
+    server = os.getenv("GITHUB_SERVER_URL", "https://github.com").strip()
+    repo = os.getenv("GITHUB_REPOSITORY", "jellasi/competiterAnalysis").strip()
+    blob_url = f"{server}/{repo}/blob/main/last_report.html"
+    return "https://htmlpreview.github.io/?" + blob_url
 
 
 def row_text(row: dict[str, Any]) -> str:
@@ -840,6 +854,154 @@ def executive_summary(rows: list[dict[str, Any]], competitors: list[str]) -> lis
     return bullets[:3]
 
 
+def split_urls(value: str) -> list[str]:
+    urls: list[str] = []
+    for part in re.split(r"\s+/\s+", value or ""):
+        part = part.strip()
+        if part.startswith("http") and part not in urls:
+            urls.append(part)
+    return urls
+
+
+def first_url(value: str) -> str:
+    urls = split_urls(value)
+    return urls[0] if urls else ""
+
+
+def slack_link(url: str, label: str = "근거") -> str:
+    return f"<{url}|{label}>" if url else "근거 확인 필요"
+
+
+def html_links(value: str) -> str:
+    urls = split_urls(value)
+    if not urls:
+        return '<span class="muted">확인 필요</span>'
+    return "".join(
+        f'<a href="{html.escape(u)}" target="_blank" rel="noopener">근거 {idx}</a>'
+        for idx, u in enumerate(urls, start=1)
+    )
+
+
+def badge_class(severity: str) -> str:
+    return {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}.get(severity, "low")
+
+
+def build_html_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors: list[str], date_from: str, date_to: str) -> str:
+    period = f"{date_from} ~ {date_to}"
+    check_date = datetime.now(timezone.utc).date().isoformat()
+    rows = aggregate_rows(rows)
+    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    ordered = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("company", ""), r.get("date", "")))
+    top = ordered[:3]
+    competitors = ["삼쩜삼", "덧셈컴퍼니", "비즈넵 환급"]
+
+    cards: list[str] = []
+    for row in ordered:
+        category = row.get("category", "기타")
+        severity = row.get("severity", "LOW")
+        impact = impact_for(row, category, severity)
+        action = action_for(row, category, severity)
+        cards.append(f"""
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <div class="company">{html.escape(row.get('company', ''))}</div>
+              <h3>{html.escape(row.get('title', ''))}</h3>
+            </div>
+            <span class="badge {badge_class(severity)}">{html.escape(severity)}</span>
+          </div>
+          <div class="meta"><span>🏷️ {html.escape(category)}</span><span>📅 {html.escape((row.get('date') or '')[:10] or check_date)}</span></div>
+          <div class="block"><strong>확인된 사실</strong><p>{html.escape(row.get('kind', ''))} · {html.escape(row.get('summary') or '세부 내용은 출처 확인 필요')}</p></div>
+          <div class="grid-two">
+            <div class="block"><strong>사업 영향</strong><p>{html.escape(impact)}</p></div>
+            <div class="block"><strong>권장 대응</strong><p>{html.escape(action)}</p></div>
+          </div>
+          <div class="sources">🔗 {html_links(row.get('url', ''))}</div>
+        </article>""")
+
+    summary_items: list[str] = []
+    for row in top:
+        severity = row.get("severity", "LOW")
+        summary_items.append(f"""
+        <li>
+          <span class="badge {badge_class(severity)}">{html.escape(severity)}</span>
+          <strong>{html.escape(row.get('company', ''))}</strong> · {html.escape(row.get('title', ''))}
+          <p>{html.escape(impact_for(row, row.get('category', '기타'), severity))}</p>
+        </li>""")
+    if not summary_items:
+        summary_items.append('<li>이번 기간 입력 데이터 기준 주요 변화가 확인되지 않았습니다.</li>')
+
+    competitor_sections: list[str] = []
+    for comp in competitors:
+        comp_rows = [r for r in ordered if r.get("company") == comp]
+        if comp_rows:
+            items = "".join(f"<li>{html.escape(r.get('title',''))} <span class='tiny'>({html.escape(r.get('severity','LOW'))})</span></li>" for r in comp_rows)
+            body = f"<ul>{items}</ul>"
+        else:
+            body = "<p class='muted'>이번 기간 날짜 메타데이터 기준 신규/변경 활동 확인 없음.</p>"
+        competitor_sections.append(f"<section class='mini'><h3>{html.escape(comp)}</h3>{body}</section>")
+
+    skipped_html = "".join(f"<li>{html.escape(x)}</li>" for x in skipped) or "<li>없음</li>"
+    errors_html = "".join(f"<li>{html.escape(x)}</li>" for x in errors) or "<li>없음</li>"
+    cards_html = "".join(cards) if cards else '<div class="card">주요 변화 없음</div>'
+
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(period)} 경쟁사 동향 리포트</title>
+  <style>
+    :root {{ --card:#ffffff; --ink:#172033; --muted:#64748b; --line:#e5e7eb; --blue:#2563eb; --green:#059669; --amber:#d97706; --red:#dc2626; }}
+    body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,"Noto Sans KR",Arial,sans-serif; background:#f3f6fb; color:var(--ink); line-height:1.65; }}
+    .hero {{ background:linear-gradient(135deg,#0f172a,#1e3a8a); color:#fff; padding:42px 28px; }}
+    .wrap {{ max-width:1120px; margin:0 auto; }}
+    .hero h1 {{ margin:0 0 12px; font-size:34px; letter-spacing:-.04em; }}
+    .hero p {{ margin:0; color:#cbd5e1; }}
+    .stats {{ display:flex; gap:12px; flex-wrap:wrap; margin-top:24px; }}
+    .stat {{ background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18); padding:12px 16px; border-radius:14px; }}
+    main {{ padding:28px; }} section {{ margin:0 0 28px; }} h2 {{ font-size:22px; letter-spacing:-.03em; margin:0 0 14px; }}
+    .summary, .mini, .card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 28px rgba(15,23,42,.06); }}
+    .summary {{ padding:22px 24px; }} .summary li {{ margin:0 0 14px; }} .summary p {{ margin:4px 0 0 0; color:var(--muted); }}
+    .cards {{ display:grid; grid-template-columns:1fr; gap:18px; }} .card {{ padding:22px; }}
+    .card-head {{ display:flex; justify-content:space-between; gap:18px; align-items:flex-start; }}
+    .company {{ color:var(--blue); font-weight:800; font-size:14px; margin-bottom:4px; }} h3 {{ margin:0; font-size:20px; letter-spacing:-.025em; }}
+    .meta {{ display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); margin:12px 0 16px; font-size:14px; }}
+    .badge {{ display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-weight:800; font-size:12px; color:#fff; white-space:nowrap; }}
+    .badge.high {{ background:var(--red); }} .badge.medium {{ background:var(--amber); }} .badge.low {{ background:var(--green); }}
+    .block {{ background:#f8fafc; border:1px solid #edf2f7; border-radius:14px; padding:14px; margin:10px 0; }} .block strong {{ display:block; margin-bottom:6px; }} .block p {{ margin:0; }}
+    .grid-two {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }} .sources {{ margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+    a {{ color:#1d4ed8; font-weight:700; text-decoration:none; background:#eff6ff; padding:4px 8px; border-radius:8px; }}
+    .competitors {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }} .mini {{ padding:18px; }} .mini ul {{ padding-left:18px; }} .muted {{ color:var(--muted); }} .tiny {{ color:var(--muted); font-size:12px; }}
+    footer {{ color:var(--muted); padding:28px; text-align:center; }} @media (max-width:800px) {{ .grid-two,.competitors {{ grid-template-columns:1fr; }} .hero h1 {{ font-size:28px; }} }}
+  </style>
+</head>
+<body>
+  <header class="hero"><div class="wrap">
+    <h1>📊 {html.escape(period)} 경쟁사 동향 리포트</h1>
+    <p>세이브택스 환급 관점에서 앱 업데이트, 약관/공지, 콘텐츠 활동을 사업 영향 중심으로 요약했습니다.</p>
+    <div class="stats">
+      <div class="stat">🗓️ 작성 기준일<br><strong>{html.escape(check_date)}</strong></div>
+      <div class="stat">🏢 분석 대상<br><strong>삼쩜삼 · 덧셈컴퍼니 · 비즈넵 환급</strong></div>
+      <div class="stat">🔎 주요 변화<br><strong>{len(ordered)}건</strong></div>
+    </div>
+  </div></header>
+  <main class="wrap">
+    <section><h2>1. Executive Summary</h2><div class="summary"><ul>{''.join(summary_items)}</ul></div></section>
+    <section><h2>2. 주요 변화</h2><div class="cards">{cards_html}</div></section>
+    <section><h2>3. 경쟁사별 상세 분석</h2><div class="competitors">{''.join(competitor_sections)}</div></section>
+    <section><h2>4. 권장 액션</h2><div class="summary"><ul>
+      <li><strong>개인정보/약관 변경 비교</strong> — 동의 UX와 제3자 제공 고지 수준 점검</li>
+      <li><strong>최신 앱 플로우 캡처</strong> — 환급 조회·신청 UX 차이 확인</li>
+      <li><strong>세무 콘텐츠 키워드 비교</strong> — SEO/랜딩 보강 주제 도출</li>
+    </ul></div></section>
+    <section><h2>5. 참고 및 수집 상태</h2><div class="summary"><strong>날짜 필터 미지원 소스</strong><ul>{skipped_html}</ul><strong>수집 오류</strong><ul>{errors_html}</ul></div></section>
+  </main>
+  <footer>Generated by SaveTax competitor monitor · Source facts only · Unknowns marked as 확인 필요</footer>
+</body>
+</html>"""
+
+
 def build_detailed_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors: list[str], date_from: str, date_to: str) -> str:
     period = f"{date_from} ~ {date_to}"
     check_date = datetime.now(timezone.utc).date().isoformat()
@@ -957,32 +1119,44 @@ def build_detailed_ci_report(rows: list[dict[str, Any]], skipped: list[str], err
 def build_slack_ci_message(rows: list[dict[str, Any]], date_from: str, date_to: str) -> str:
     rows = aggregate_rows(rows)
     period = f"{date_from}~{date_to}"
-    url = report_url()
+    detail_url = html_report_url()
     severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     top = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("date", "")))[:3]
-    lines = [f"📊 {period} 경쟁사 주간 요약"]
+
+    lines = [
+        f"📊 *세이브택스 경쟁사 주간 요약*  |  `{period}`",
+        "",
+        "*이번 주 핵심 변화*",
+    ]
     if not top:
-        lines.append("주요 변화: 입력 데이터 기준 확인된 주요 변화 없음")
+        lines.append("- 입력 데이터 기준 확인된 주요 변화 없음")
     for row in top:
-        icon = "🚨 " if row.get("severity") == "HIGH" else ""
-        why = impact_for(row, row.get("category", "기타"), row.get("severity", "LOW"))
-        why = textwrap.shorten(why, width=90, placeholder="...")
-        change = textwrap.shorten(row.get("title", ""), width=80, placeholder="...")
-        lines.append(f"- {icon}[{row.get('severity','LOW')}] {row['company']}: {change} → {why}")
+        severity = row.get("severity", "LOW")
+        icon = "🚨" if severity == "HIGH" else ("⚠️" if severity == "MEDIUM" else "ℹ️")
+        why = textwrap.shorten(impact_for(row, row.get("category", "기타"), severity), width=92, placeholder="...")
+        change = textwrap.shorten(row.get("title", ""), width=72, placeholder="...")
+        evidence = slack_link(first_url(row.get("url", "")), "근거")
+        lines += [
+            f"- {icon} *[{severity}] {row['company']}* · {change}",
+            f"  → {why}",
+            f"  ↳ {evidence}",
+        ]
 
     actions = []
     if any("개인정보" in row_text(r) or "처리방침" in row_text(r) for r in rows):
-        actions.append("삼쩜삼 개인정보 처리방침 개정 전후 비교")
+        actions.append("개인정보/약관 변경 전후 비교")
     if any("앱 업데이트" in r.get("kind", "") for r in rows):
-        actions.append("경쟁사 최신 앱 플로우 캡처/비교")
+        actions.append("최신 앱 플로우 캡처/비교")
     if any(r.get("category") == "마케팅" for r in rows):
         actions.append("세무 콘텐츠 키워드·랜딩 보강점 확인")
     if actions:
-        lines.append("권장 액션: " + " / ".join(actions[:3]))
-    lines.append(f"상세 리포트: {url}")
+        lines += ["", "*이번 주 권장 액션*"]
+        for action in actions[:3]:
+            lines.append(f"- ✅ {action}")
+    lines += ["", f"🔎 *상세 HTML 리포트:* {slack_link(detail_url, '보기')}"]
     msg = "\n".join(lines)
     if len(msg) > 1200:
-        msg = msg[:1160].rstrip() + f"...\n상세 리포트: {url}"
+        msg = msg[:1130].rstrip() + f"\n\n🔎 *상세 HTML 리포트:* {slack_link(detail_url, '보기')}"
     return msg
 
 
@@ -995,6 +1169,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--html-report", type=Path, default=DEFAULT_HTML_REPORT)
+    parser.add_argument("--slack-report", type=Path, default=DEFAULT_SLACK_REPORT)
+    parser.add_argument("--send-existing", action="store_true", help="Send existing report files without collecting again")
     parser.add_argument("--notify", action="store_true", help="Send Slack/email when changes are detected")
     parser.add_argument("--notify-on-errors", action="store_true", help="Send notifications for fetch errors too")
     parser.add_argument("--force-notify", action="store_true", help="Send notification even when no change")
@@ -1005,19 +1182,29 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_json(args.config, {})
 
+    if args.send_existing:
+        report = args.report.read_text(encoding="utf-8") if args.report.exists() else ""
+        html_report = args.html_report.read_text(encoding="utf-8") if args.html_report.exists() else None
+        slack_message = args.slack_report.read_text(encoding="utf-8") if args.slack_report.exists() else report
+        send_slack(slack_message)
+        send_email(report, html_report)
+        return 0
+
     if args.period_from or args.period_to:
         if not (args.period_from and args.period_to):
             raise SystemExit("--period-from and --period-to must be used together")
         rows, skipped, errors = build_competitor_data(config, args.period_from, args.period_to)
         report = build_detailed_ci_report(rows, skipped, errors, args.period_from, args.period_to)
+        html_report = build_html_ci_report(rows, skipped, errors, args.period_from, args.period_to)
         slack_message = build_slack_ci_message(rows, args.period_from, args.period_to)
         args.report.write_text(report, encoding="utf-8")
-        (args.report.parent / "last_slack_message.txt").write_text(slack_message + "\n", encoding="utf-8")
+        args.html_report.write_text(html_report, encoding="utf-8")
+        args.slack_report.write_text(slack_message + "\n", encoding="utf-8")
         print(report)
         print("\n--- Slack message preview ---\n" + slack_message)
         if args.notify:
             send_slack(slack_message)
-            send_email(report)
+            send_email(report, html_report)
         else:
             print("No notification sent")
         return 0

@@ -109,9 +109,11 @@ python monitor.py --notify --force-notify
 ## 결과 파일
 
 - `state/competitor_state.json`: 이전 실행 기준 스냅샷
-- `last_report.md`: 최근 실행 리포트
+- `last_report.md`: 최근 실행 상세 Markdown 리포트
+- `last_report.html`: 카드형 HTML 상세 리포트. Slack의 `상세 HTML 리포트` 링크에서 확인
+- `last_slack_message.txt`: Slack 채널 게시용 요약 메시지
 
-GitHub Actions는 매 실행 후 두 파일을 artifact로 업로드하고, state/report 변경분을 repo에 커밋합니다.
+GitHub Actions는 매 실행 후 리포트 파일을 artifact로 업로드하고, state/report 변경분을 repo에 커밋합니다.
 
 ## 주의사항
 

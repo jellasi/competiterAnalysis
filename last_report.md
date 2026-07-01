@@ -7,7 +7,7 @@
 - 우리 회사/서비스: 세이브택스 환급
 - 주요 관심 영역: 앱 서비스 업데이트, 주요 홈페이지 변경, 약관/공지 변경
 - 이전 리포트: 확인 필요
-- 상세 리포트 URL: https://github.com/jellasi/competiterAnalysis/actions/runs/28503948396
+- 상세 리포트 URL: https://github.com/jellasi/competiterAnalysis/actions
 
 ## 1. Executive Summary
 - 비즈넵 환급에서 비즈넵 - 사업자 세금환급, AI 세무 상담, 세무기장 v5.0.8 변화가 확인되었습니다. 중요도는 MEDIUM이며, 우리에게 중요한 이유는 앱 내 서비스 탐색 구조를 넓히는 변화로, 환급 외 부가 서비스 노출·교차판매 UX 강화 가능성이 있습니다.
