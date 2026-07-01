@@ -476,19 +476,49 @@ def should_notify(changes: list[dict[str, Any]], errors: list[dict[str, str]], n
 
 
 def send_slack(report: str) -> None:
+    bot_token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    channel_id = os.getenv("SLACK_CHANNEL_ID", "").strip()
     webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
-    if not webhook:
-        print("SLACK_WEBHOOK_URL not set; skip Slack notification")
-        return
+
     text = report
     if len(text) > 3500:
         text = text[:3500] + "\n...보고서가 길어 일부 생략되었습니다. GitHub Actions artifact/last_report.md를 확인하세요."
-    payload = json.dumps({"text": text}).encode("utf-8")
-    req = Request(webhook, data=payload, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT}, method="POST")
-    with urlopen(req, timeout=20) as resp:
-        if resp.status >= 300:
-            raise RuntimeError(f"Slack webhook failed: HTTP {resp.status}")
-    print("Slack notification sent")
+
+    # Preferred path: post as the installed TA bot via Slack Web API.
+    # Required secrets: SLACK_BOT_TOKEN + SLACK_CHANNEL_ID.
+    if bot_token and channel_id:
+        payload = json.dumps({"channel": channel_id, "text": text, "unfurl_links": False, "unfurl_media": False}).encode("utf-8")
+        req = Request(
+            "https://slack.com/api/chat.postMessage",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": USER_AGENT,
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=20) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            if resp.status >= 300:
+                raise RuntimeError(f"Slack bot API failed: HTTP {resp.status}")
+            data = json.loads(body)
+            if not data.get("ok"):
+                raise RuntimeError(f"Slack bot API failed: {data.get('error', 'unknown_error')}")
+        print("Slack bot notification sent")
+        return
+
+    # Backward-compatible fallback: Incoming Webhook.
+    if webhook:
+        payload = json.dumps({"text": text}).encode("utf-8")
+        req = Request(webhook, data=payload, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT}, method="POST")
+        with urlopen(req, timeout=20) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(f"Slack webhook failed: HTTP {resp.status}")
+        print("Slack webhook notification sent")
+        return
+
+    print("SLACK_BOT_TOKEN/SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL not set; skip Slack notification")
 
 
 def send_email(report: str) -> None:

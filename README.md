@@ -55,16 +55,24 @@ GitHub 저장소의 Settings → Secrets and variables → Actions → Repositor
 
 ### Slack 알림
 
+권장 방식은 기존 `TA bot`의 Bot Token으로 Slack Web API `chat.postMessage`를 호출하는 방식입니다. Webhook도 fallback으로 계속 지원합니다.
+
 | Secret | 설명 |
 |---|---|
-| `SLACK_WEBHOOK_URL` | Slack Incoming Webhook URL |
+| `SLACK_BOT_TOKEN` | Slack Bot User OAuth Token. `xoxb-...` 형식. GitHub Secret으로만 저장 |
+| `SLACK_CHANNEL_ID` | 리포트를 보낼 Slack 채널 ID. `C...` 또는 `G...` 형식 |
+| `SLACK_WEBHOOK_URL` | 선택사항. Bot Token이 없을 때 사용할 Incoming Webhook URL |
 
-Slack Webhook 만드는 법:
+TA bot 방식 설정:
 
-1. Slack API에서 Incoming Webhooks 앱 생성 또는 기존 앱 사용
-2. 알림 받을 채널 선택
-3. Webhook URL을 복사
-4. GitHub Secret `SLACK_WEBHOOK_URL`에 저장
+1. Slack에서 리포트용 채널을 생성합니다.
+2. 해당 채널에서 `/invite @TA bot` 또는 채널 상세 → Integrations/Add apps로 `TA bot`을 초대합니다.
+3. Slack 앱 설정에서 TA bot에 `chat:write` 권한이 있는지 확인합니다.
+4. 채널 ID를 복사합니다. Slack 채널 우클릭/채널 상세 → Copy link에서 `archives/C...` 또는 `archives/G...` 부분이 채널 ID입니다.
+5. GitHub 저장소 Settings → Secrets and variables → Actions → Repository secrets에 `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`를 저장합니다.
+6. Actions에서 수동 실행 후 로그에 `Slack bot notification sent`가 보이면 성공입니다.
+
+보안 주의: Bot Token이 채팅/문서에 노출되면 Slack에서 즉시 rotate/revoke 후 새 토큰을 GitHub Secret에 저장하세요.
 
 ### 이메일 알림
 
