@@ -14,6 +14,14 @@ on:
         options:
           - "false"
           - "true"
+      period_from:
+        description: "기간 리포트 시작일 YYYY-MM-DD. 비우면 정기 변경 감시 모드"
+        required: false
+        default: ""
+      period_to:
+        description: "기간 리포트 종료일 YYYY-MM-DD. 종료일 포함"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -47,7 +55,11 @@ jobs:
           if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then
             FORCE="--force-notify"
           fi
-          python monitor.py --notify $FORCE
+          if [ -n "${{ github.event.inputs.period_from }}" ] && [ -n "${{ github.event.inputs.period_to }}" ]; then
+            python monitor.py --notify --period-from "${{ github.event.inputs.period_from }}" --period-to "${{ github.event.inputs.period_to }}"
+          else
+            python monitor.py --notify $FORCE
+          fi
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4

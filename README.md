@@ -110,3 +110,15 @@ GitHub Actions는 매 실행 후 두 파일을 artifact로 업로드하고, stat
 - Google Play는 동적/차단 정책이 있어 페이지 수집이 가끔 실패할 수 있습니다. 실패 내용은 리포트의 `수집 오류` 섹션에 표시됩니다.
 - 웹페이지 전체 HTML이 아니라 텍스트를 정규화해서 비교합니다. 그래도 광고/배너/랜덤 문구 변경으로 알림이 발생할 수 있습니다.
 - 너무 많은 알림이 오면 `sources.json`에서 덜 중요한 URL을 제거하거나 `keywords`를 조정하세요.
+
+## 기간 리포트 수동 발송
+
+GitHub Actions의 `Run workflow`에서 아래 입력값을 넣으면 특정 기간의 실제 수집 데이터 리포트를 즉시 이메일/Slack으로 발송합니다.
+
+```text
+force_notify=true
+period_from=2026-06-23
+period_to=2026-06-28
+```
+
+`period_from` / `period_to`를 비우면 기존 주간 변경 감시 모드로 실행됩니다.

@@ -22,7 +22,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -526,6 +526,168 @@ def send_email(report: str) -> None:
     print("Email notification sent")
 
 
+
+
+def parse_date_start(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def parse_date_end_exclusive(value: str) -> datetime:
+    return parse_date_start(value) + timedelta(days=1)
+
+
+def parse_iso_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def parse_korean_date_line(value: str) -> datetime | None:
+    m = re.search(r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})", value or "")
+    if not m:
+        return None
+    y, mo, d = map(int, m.groups())
+    return datetime(y, mo, d, tzinfo=timezone.utc)
+
+
+def in_period(dt: datetime | None, start: datetime, end_exclusive: datetime) -> bool:
+    return bool(dt and start <= dt < end_exclusive)
+
+
+def summarize_body(text: str, limit: int = 420) -> str:
+    return textwrap.shorten(clean_spaces(strip_tags(text or "")), width=limit, placeholder="...")
+
+
+def collect_zendesk_period(company: str, source: dict[str, Any], start: datetime, end_exclusive: datetime) -> list[dict[str, Any]]:
+    url = source["url"]
+    # Ask Zendesk for a larger first page; recent items are enough for weekly checks.
+    sep = "&" if "?" in url else "?"
+    if "per_page=" not in url:
+        url = f"{url}{sep}per_page=100"
+    raw, _ = http_get(url)
+    data = json.loads(raw)
+    rows = []
+    for article in data.get("articles") or []:
+        dt = parse_iso_datetime(article.get("updated_at") or article.get("created_at") or "")
+        if in_period(dt, start, end_exclusive):
+            rows.append({
+                "company": company,
+                "source": source["label"],
+                "kind": "공지/약관/고객센터 업데이트",
+                "date": dt.isoformat() if dt else "",
+                "title": article.get("title") or "",
+                "url": article.get("html_url") or url,
+                "summary": summarize_body(article.get("body") or ""),
+            })
+    return rows
+
+
+def collect_appstore_period(company: str, source: dict[str, Any], start: datetime, end_exclusive: datetime) -> list[dict[str, Any]]:
+    item = fetch_appstore(company, source)
+    if not item.ok:
+        return []
+    meta = item.metadata or {}
+    dt = parse_iso_datetime(meta.get("currentVersionReleaseDate") or "")
+    if not in_period(dt, start, end_exclusive):
+        return []
+    return [{
+        "company": company,
+        "source": source["label"],
+        "kind": "App Store 앱 업데이트",
+        "date": dt.isoformat() if dt else "",
+        "title": f"{meta.get('trackName') or item.title} v{meta.get('version') or ''}".strip(),
+        "url": meta.get("trackViewUrl") or item.url,
+        "summary": summarize_body(meta.get("releaseNotes") or meta.get("description") or ""),
+    }]
+
+
+def collect_google_play_period(company: str, source: dict[str, Any], start: datetime, end_exclusive: datetime) -> list[dict[str, Any]]:
+    item = fetch_webpage(company, source)
+    if not item.ok:
+        return []
+    lines = item.normalized_text.splitlines()
+    update_date = None
+    release_notes = []
+    for idx, line in enumerate(lines):
+        if line == "업데이트 날짜" and idx + 1 < len(lines):
+            update_date = parse_korean_date_line(lines[idx + 1])
+        if line == "새로운 기능":
+            release_notes = lines[idx + 1: idx + 8]
+    if not in_period(update_date, start, end_exclusive):
+        return []
+    return [{
+        "company": company,
+        "source": source["label"],
+        "kind": "Google Play 앱 업데이트",
+        "date": update_date.isoformat() if update_date else "",
+        "title": item.title or source["label"],
+        "url": item.url,
+        "summary": summarize_body("\n".join(release_notes) or item.text),
+    }]
+
+
+def build_period_report(config: dict[str, Any], date_from: str, date_to: str) -> str:
+    start = parse_date_start(date_from)
+    end_exclusive = parse_date_end_exclusive(date_to)
+    rows: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+
+    for company_cfg in config["companies"]:
+        company = company_cfg["name"]
+        for source in company_cfg["sources"]:
+            try:
+                if source["type"] == "zendesk_articles":
+                    rows.extend(collect_zendesk_period(company, source, start, end_exclusive))
+                elif source["type"] == "appstore_lookup":
+                    rows.extend(collect_appstore_period(company, source, start, end_exclusive))
+                elif source["type"] == "webpage" and "play.google.com/store/apps/details" in source.get("url", ""):
+                    rows.extend(collect_google_play_period(company, source, start, end_exclusive))
+                else:
+                    skipped.append(f"{company} / {source['label']}: 날짜 필터 가능한 공개 메타데이터가 없어 정기 스냅샷 비교 대상")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{company} / {source['label']}: {e!r}")
+
+    rows.sort(key=lambda r: (r.get("date", ""), r.get("company", ""), r.get("source", "")))
+    lines = [
+        "# 세이브택스 환급 경쟁사 기간 데이터 리포트",
+        "",
+        f"- 대상 기간: {date_from} ~ {date_to} (KST/UTC 날짜 기준 혼합 소스, 종료일 포함)",
+        f"- 수집 항목: {len(rows)}건",
+        f"- 생성 시각: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        "",
+    ]
+    if rows:
+        lines += ["## 기간 내 확인된 업데이트", ""]
+        for row in rows:
+            lines += [
+                f"### {row['company']} - {row['kind']}",
+                "",
+                f"- 소스: {row['source']}",
+                f"- 일시: {row['date']}",
+                f"- 제목: {row['title']}",
+                f"- URL: {row['url']}",
+            ]
+            if row.get("summary"):
+                lines += [f"- 요약: {row['summary']}"]
+            lines.append("")
+    else:
+        lines += ["## 기간 내 확인된 업데이트", "", "해당 기간에 날짜 메타데이터 기준으로 확인된 업데이트가 없습니다.", ""]
+
+    if skipped:
+        lines += ["## 참고: 날짜 필터 미지원 소스", ""]
+        lines += [f"- {x}" for x in skipped]
+        lines.append("")
+    if errors:
+        lines += ["## 수집 오류", ""]
+        lines += [f"- {x}" for x in errors]
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Monitor SaveTax refund competitors and notify changes.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -535,9 +697,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--notify-on-errors", action="store_true", help="Send notifications for fetch errors too")
     parser.add_argument("--force-notify", action="store_true", help="Send notification even when no change")
     parser.add_argument("--no-save", action="store_true", help="Do not update state file")
+    parser.add_argument("--period-from", help="Build a one-off date-filtered report from YYYY-MM-DD")
+    parser.add_argument("--period-to", help="Build a one-off date-filtered report through YYYY-MM-DD, inclusive")
     args = parser.parse_args(argv)
 
     config = load_json(args.config, {})
+
+    if args.period_from or args.period_to:
+        if not (args.period_from and args.period_to):
+            raise SystemExit("--period-from and --period-to must be used together")
+        report = build_period_report(config, args.period_from, args.period_to)
+        args.report.write_text(report, encoding="utf-8")
+        print(report)
+        if args.notify:
+            send_slack(report)
+            send_email(report)
+        else:
+            print("No notification sent")
+        return 0
+
     previous_existed = args.state.exists()
     previous = load_json(args.state, {"sources": {}})
 
