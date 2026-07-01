@@ -1,9 +1,9 @@
 name: Weekly competitor monitor
 
 on:
-  # 매주 월요일 09:00 KST = 월요일 00:00 UTC
+  # 매주 월요일 08:00 KST = 일요일 23:00 UTC
   schedule:
-    - cron: "0 0 * * 1"
+    - cron: "0 23 * * 0"
   workflow_dispatch:
     inputs:
       force_notify:
@@ -41,7 +41,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO || 'minseok.cho@unitblack.co.kr,jellasi@naver.com' }}
         run: |
           FORCE=""
           if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then

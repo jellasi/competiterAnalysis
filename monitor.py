@@ -427,7 +427,7 @@ def md_escape(s: Any) -> str:
 
 def format_report(changes: list[dict[str, Any]], errors: list[dict[str, str]], previous_existed: bool) -> str:
     date_kst_hint = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"# 세이브택스 환급 경쟁사 변경 모니터링 리포트", "", f"- 실행 시각: {date_kst_hint}", f"- 감지 변경: {len(changes)}건", f"- 수집 오류: {len(errors)}건", ""]
+    lines = [f"# 세이브택스 환급 주간 경쟁사 변경 취합 리포트", "", f"- 실행 시각: {date_kst_hint}", "- 정기 발송: 매주 월요일 오전 8시(KST)", f"- 감지 변경: {len(changes)}건", f"- 수집 오류: {len(errors)}건", ""]
     if not previous_existed:
         lines += ["> 첫 실행이라 기준 스냅샷만 저장했습니다. 다음 실행부터 변경사항을 알립니다.", ""]
     if changes:
@@ -505,7 +505,7 @@ def send_email(report: str) -> None:
     use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
 
     msg = EmailMessage()
-    msg["Subject"] = "[세이브택스] 경쟁사 변경 모니터링 알림"
+    msg["Subject"] = "[세이브택스] 주간 경쟁사 변경 취합 리포트"
     msg["From"] = mail_from
     msg["To"] = mail_to
     msg.set_content(report)

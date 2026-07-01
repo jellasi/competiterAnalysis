@@ -29,10 +29,10 @@
 `.github/workflows/weekly-competitor-monitor.yml` 기준:
 
 ```yaml
-cron: "0 0 * * 1"
+cron: "0 23 * * 0"
 ```
 
-매주 월요일 09:00 KST에 실행됩니다.
+매주 월요일 08:00 KST에 실행됩니다.
 
 ## 첫 실행 동작
 
@@ -41,6 +41,15 @@ cron: "0 0 * * 1"
 테스트 알림을 보내고 싶으면 GitHub Actions에서 수동 실행할 때 `force_notify=true`를 선택하세요.
 
 ## GitHub Secrets 설정
+
+기본 수신자:
+
+```text
+minseok.cho@unitblack.co.kr
+jellasi@naver.com
+```
+
+`EMAIL_TO` secret을 별도로 설정하면 이 기본 수신자를 덮어씁니다.
 
 GitHub 저장소의 Settings → Secrets and variables → Actions → Repository secrets에 아래 값을 추가하세요.
 
@@ -67,7 +76,7 @@ Slack Webhook 만드는 법:
 | `SMTP_PASSWORD` | SMTP 비밀번호/앱 비밀번호 | Gmail은 앱 비밀번호 권장 |
 | `SMTP_USE_SSL` | SSL 직접 연결 여부 | `false` for 587, `true` for 465 |
 | `EMAIL_FROM` | 발신 이메일 | `yourname@gmail.com` |
-| `EMAIL_TO` | 수신 이메일 | `you@company.com` |
+| `EMAIL_TO` | 수신 이메일. 미설정 시 기본값 사용 | `minseok.cho@unitblack.co.kr,jellasi@naver.com` |
 
 Gmail을 쓸 경우 일반 계정 비밀번호가 아니라 Google 계정의 **앱 비밀번호**를 쓰는 것을 권장합니다.
 
