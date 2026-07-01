@@ -1,0 +1,70 @@
+name: Weekly competitor monitor
+
+on:
+  # 매주 월요일 09:00 KST = 월요일 00:00 UTC
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: "변경사항이 없어도 Slack/Email 테스트 알림을 보냅니다"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run monitor
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then
+            FORCE="--force-notify"
+          fi
+          python monitor.py --notify --notify-on-errors $FORCE
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: competitor-monitor-report
+          path: |
+            last_report.md
+            state/competitor_state.json
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/competitor_state.json last_report.md
+          if git diff --cached --quiet; then
+            echo "No state/report changes to commit"
+          else
+            git commit -m "chore: update competitor monitor state"
+            git push
+          fi

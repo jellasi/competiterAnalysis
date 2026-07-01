@@ -1,0 +1,124 @@
+{
+  "companies": [
+    {
+      "name": "삼쩜삼",
+      "sources": [
+        {
+          "id": "3o3_home",
+          "type": "webpage",
+          "label": "홈페이지",
+          "url": "https://www.3o3.co.kr/",
+          "importance": "medium"
+        },
+        {
+          "id": "3o3_notice",
+          "type": "webpage",
+          "label": "공지사항/약관 개정 안내",
+          "url": "https://help.3o3.co.kr/hc/ko/categories/900000268066-%EA%B3%B5%EC%A7%80%EC%82%AC%ED%95%AD",
+          "importance": "high"
+        },
+        {
+          "id": "3o3_terms",
+          "type": "webpage",
+          "label": "서비스 이용약관",
+          "url": "https://assets.jobis.co/szs/docs/terms.html",
+          "importance": "high"
+        },
+        {
+          "id": "3o3_google_play",
+          "type": "webpage",
+          "label": "Google Play 앱 페이지",
+          "url": "https://play.google.com/store/apps/details?id=co.jobis.szs&hl=ko&gl=KR",
+          "importance": "medium"
+        },
+        {
+          "id": "3o3_app_store",
+          "type": "appstore_lookup",
+          "label": "App Store 앱 정보",
+          "app_id": "1584600717",
+          "country": "kr",
+          "importance": "medium"
+        }
+      ]
+    },
+    {
+      "name": "덧셈컴퍼니",
+      "sources": [
+        {
+          "id": "pluscompany_home",
+          "type": "webpage",
+          "label": "홈페이지",
+          "url": "https://www.pluscompany.kr/",
+          "importance": "medium"
+        },
+        {
+          "id": "pluscompany_terms",
+          "type": "webpage",
+          "label": "이용규칙/약관",
+          "url": "https://www.pluscompany.kr/rule-user",
+          "importance": "high"
+        },
+        {
+          "id": "pluscompany_google_play",
+          "type": "webpage",
+          "label": "Google Play 앱 페이지",
+          "url": "https://play.google.com/store/apps/details?id=biz.pluscompany.plus&hl=ko&gl=KR",
+          "importance": "medium"
+        },
+        {
+          "id": "pluscompany_app_store",
+          "type": "appstore_lookup",
+          "label": "App Store 앱 정보",
+          "app_id": "6475924107",
+          "country": "kr",
+          "importance": "medium"
+        }
+      ]
+    },
+    {
+      "name": "비즈넵 환급",
+      "sources": [
+        {
+          "id": "bznav_refund_home",
+          "type": "webpage",
+          "label": "비즈넵 환급 홈페이지",
+          "url": "https://refund.bznav.com/",
+          "importance": "medium"
+        },
+        {
+          "id": "bznav_home",
+          "type": "webpage",
+          "label": "비즈넵 홈페이지",
+          "url": "https://bznav.com/",
+          "importance": "medium"
+        },
+        {
+          "id": "bznav_help",
+          "type": "webpage",
+          "label": "고객센터/공지/약관",
+          "url": "https://help.bznav.com/hc/ko",
+          "importance": "high"
+        },
+        {
+          "id": "bznav_google_play",
+          "type": "webpage",
+          "label": "Google Play 앱 페이지",
+          "url": "https://play.google.com/store/apps/details?id=com.emmental.bznav.mobile&hl=ko&gl=KR",
+          "importance": "medium"
+        },
+        {
+          "id": "bznav_app_store",
+          "type": "appstore_lookup",
+          "label": "App Store 앱 정보",
+          "app_id": "1186216942",
+          "country": "kr",
+          "importance": "medium"
+        }
+      ]
+    }
+  ],
+  "keywords": {
+    "high": ["약관", "개인정보", "처리방침", "환불", "수수료", "서비스 종료", "중단", "개정", "공지", "보안", "세무대리"],
+    "medium": ["업데이트", "신규", "출시", "개선", "혜택", "환급", "이벤트", "프로모션", "버전"]
+  }
+}
