@@ -1,18 +1,19 @@
-📊 *세이브택스 경쟁사 주간 요약*  |  `2026-07-06~2026-07-12`
+📊 *세이브택스 경쟁사 주간 요약*  |  `2026-07-13~2026-07-19`
 
 *이번 주 핵심 변화*
-- ⚠️ *[MEDIUM] 비즈넵 환급* · 비즈넵 - 사업자 세금환급, AI 세무 상담, 세무기장 - Google Play 앱
-  → 앱 내 서비스 탐색 구조를 넓히는 변화로, 환급 외 부가 서비스 노출·교차판매 UX 강화 가능성이 있습니다.
-  ↳ <https://play.google.com/store/apps/details?id=com.emmental.bznav.mobile&hl=ko&gl=KR|근거>
-- ⚠️ *[MEDIUM] 비즈넵 환급* · 비즈넵 - 사업자 세금환급, AI 세무 상담, 세무기장 v5.1.0
-  → 앱 내 서비스 탐색 구조를 넓히는 변화로, 환급 외 부가 서비스 노출·교차판매 UX 강화 가능성이 있습니다.
-  ↳ <https://apps.apple.com/kr/app/%EB%B9%84%EC%A6%88%EB%84%B5-%EC%82%AC%EC%97%85%EC%9E%90-%EC%84%B8%EA%B8%88%ED%99%98%EA%B8%89-ai-%EC%84%B8%EB%AC%B4-%EC%83%81%EB%8B%B4-%EC%84%B8%EB%AC%B4%EA%B8%B0%EC%9E%A5/id1186216942?uo=4|근거>
-- ⚠️ *[MEDIUM] 삼쩜삼* · 📌 삼쩜삼 고객센터 카테고리 맵
+- ⚠️ *[MEDIUM] 삼쩜삼* · [뉴스] 삼쩜삼 간편신고에 대한 모든 것 알려드려요.
+  → 세무 정보성 콘텐츠를 통한 SEO/신뢰 확보 활동으로 보이며, 즉각적 기능 변화보다는 상단 퍼널 유입 경쟁 측면에서 참고가 필요합니다.
+  ↳ <https://help.3o3.co.kr/hc/ko/articles/17993432442905|근거>
+- ⚠️ *[MEDIUM] 삼쩜삼* · 25년도 종합소득세 정기신고 안내('25.5.1~6.2)
+  → 세무 정보성 콘텐츠를 통한 SEO/신뢰 확보 활동으로 보이며, 즉각적 기능 변화보다는 상단 퍼널 유입 경쟁 측면에서 참고가 필요합니다.
+  ↳ <https://help.3o3.co.kr/hc/ko/articles/46164795474329|근거>
+- ⚠️ *[MEDIUM] 삼쩜삼* · [중요] 삼쩜삼 사칭 및 스미싱 주의 안내
   → 개인정보 제공/활용 범위 변화는 환급 서비스 신뢰도와 동의 UX에 영향을 줄 수 있어 약관·동의 플로우 비교 확인이 필요합니다.
-  ↳ <https://help.3o3.co.kr/hc/ko/articles/4409612086937|근거>
+  ↳ <https://help.3o3.co.kr/hc/ko/articles/45812545310489|근거>
 
 *이번 주 권장 액션*
 - ✅ 개인정보/약관 변경 전후 비교
 - ✅ 최신 앱 플로우 캡처/비교
+- ✅ 세무 콘텐츠 키워드·랜딩 보강점 확인
 
 🔎 *상세 HTML 리포트:* <https://htmlpreview.github.io/?https://github.com/jellasi/competiterAnalysis/blob/main/last_report.html|보기>
