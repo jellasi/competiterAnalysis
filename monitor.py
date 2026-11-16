@@ -36,6 +36,7 @@ DEFAULT_STATE = ROOT / "state" / "competitor_state.json"
 DEFAULT_REPORT = ROOT / "last_report.md"
 DEFAULT_HTML_REPORT = ROOT / "last_report.html"
 DEFAULT_SLACK_REPORT = ROOT / "last_slack_message.txt"
+DEFAULT_SLACK_THREAD = ROOT / "last_slack_thread.json"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -477,14 +478,14 @@ def should_notify(changes: list[dict[str, Any]], errors: list[dict[str, str]], n
     return bool(changes) or (notify_on_errors and bool(errors))
 
 
-def send_slack(report: str) -> None:
+def send_slack(report: str, thread: list[str] | None = None) -> None:
     bot_token = os.getenv("SLACK_BOT_TOKEN", "").strip()
     channel_id = os.getenv("SLACK_CHANNEL_ID", "").strip()
     webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
 
     text = report
-    if len(text) > 3500:
-        text = text[:3500] + "\n...보고서가 길어 일부 생략되었습니다. GitHub Actions artifact/last_report.md를 확인하세요."
+    if len(text) > 3800:
+        text = text[:3800] + "\n...보고서가 길어 일부 생략되었습니다. 상세 리포트를 확인하세요."
 
     # Preferred path: post as the installed TA bot via Slack Web API.
     # Required secrets: SLACK_BOT_TOKEN + SLACK_CHANNEL_ID.
@@ -508,6 +509,12 @@ def send_slack(report: str) -> None:
             if not data.get("ok"):
                 raise RuntimeError(f"Slack bot API failed: {data.get('error', 'unknown_error')}")
         print("Slack bot notification sent")
+        parent_ts = data.get("ts")
+        for reply in (thread or []):
+            post_slack_bot(bot_token, channel_id, reply[:3800], parent_ts)
+            time.sleep(1.1)
+        if thread:
+            print(f"Slack thread replies sent: {len(thread)}")
         return
 
     # Backward-compatible fallback: Incoming Webhook.
@@ -521,6 +528,23 @@ def send_slack(report: str) -> None:
         return
 
     print("SLACK_BOT_TOKEN/SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL not set; skip Slack notification")
+
+
+def post_slack_bot(bot_token: str, channel_id: str, text: str, thread_ts: str | None = None) -> dict[str, Any]:
+    body_obj: dict[str, Any] = {"channel": channel_id, "text": text, "unfurl_links": False, "unfurl_media": False}
+    if thread_ts:
+        body_obj["thread_ts"] = thread_ts
+    req = Request(
+        "https://slack.com/api/chat.postMessage",
+        data=json.dumps(body_obj).encode("utf-8"),
+        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json; charset=utf-8", "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    with urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    if not data.get("ok"):
+        raise RuntimeError(f"Slack bot API failed: {data.get('error', 'unknown_error')}")
+    return data
 
 
 def send_email(report: str, html_report: str | None = None) -> None:
@@ -604,18 +628,68 @@ def collect_zendesk_period(company: str, source: dict[str, Any], start: datetime
     data = json.loads(raw)
     rows = []
     for article in data.get("articles") or []:
-        dt = parse_iso_datetime(article.get("updated_at") or article.get("created_at") or "")
-        if in_period(dt, start, end_exclusive):
-            rows.append({
-                "company": company,
-                "source": source["label"],
-                "kind": "공지/약관/고객센터 업데이트",
-                "date": dt.isoformat() if dt else "",
-                "title": article.get("title") or "",
-                "url": article.get("html_url") or url,
-                "summary": summarize_body(article.get("body") or ""),
-            })
+        # updated_at 은 라벨·순서만 바꿔도 바뀐다(예: 1월 공지가 11월에 updated_at 만 갱신).
+        # 본문이 실제로 바뀐 시각인 edited_at, 없으면 created_at 으로 기간을 거른다.
+        created = parse_iso_datetime(article.get("created_at") or "")
+        edited = parse_iso_datetime(article.get("edited_at") or "") or created
+        if not in_period(edited, start, end_exclusive):
+            continue
+        is_new = in_period(created, start, end_exclusive)
+        body_text = clean_spaces(strip_tags(article.get("body") or ""))
+        rows.append({
+            "company": company,
+            "source": source["label"],
+            "source_type": "notice",
+            "kind": "새 공지" if is_new else "공지 본문 수정",
+            "date": edited.isoformat() if edited else "",
+            "created": created.isoformat() if created else "",
+            "title": article.get("title") or "",
+            "url": article.get("html_url") or url,
+            "summary": summarize_body(body_text),
+            "body": body_text[:8000],
+            "facts": extract_notice_facts(body_text),
+        })
     return rows
+
+
+# 본문에 있으면 사람이 꼭 봐야 하는 말(돈·동의·서비스 지속). 분류·중요도·요약에 함께 쓴다.
+WATCH_TERMS = [
+    "이용료", "수수료", "자동출금", "자동 출금", "CMS", "환불", "가격", "요금", "할인",
+    "환급 완료", "서비스 종료", "서비스 중단", "개인정보", "제3자", "처리방침", "위탁", "동의",
+]
+MONEY_TERMS = ["이용료", "수수료", "자동출금", "자동 출금", "CMS", "환불", "가격", "요금", "환급 완료"]
+PRIVACY_TERMS = ["개인정보", "제3자", "처리방침", "위탁"]
+STOP_TERMS = ["서비스 종료", "서비스 중단"]
+
+
+def extract_notice_facts(text: str) -> dict[str, Any]:
+    """공지 본문에서 공고일·시행일과 바뀐 조항 줄을 뽑는다(사람이 바로 읽을 핵심)."""
+    facts: dict[str, Any] = {}
+    date_pat = r"(\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일|\d{4}\s*[.\-/]\s*\d{1,2}\s*[.\-/]\s*\d{1,2})"
+    m = re.search(r"공고\s*일(?:자)?\s*[:：]?\s*" + date_pat, text)
+    if m:
+        facts["announced"] = re.sub(r"\s+", " ", m.group(1))
+    m = re.search(r"시행\s*일(?:자)?\s*[:：]?\s*" + date_pat, text)
+    if m:
+        facts["effective"] = re.sub(r"\s+", " ", m.group(1))
+    clauses: list[str] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*제\s*\d+\s*조", line):
+            detail = [line.strip()]
+            for nxt in lines[i + 1 : i + 4]:
+                if re.match(r"^\s*(제\s*\d+\s*조|\[|※|감사합니다)", nxt):
+                    break
+                detail.append(nxt.strip().lstrip("-·• ").strip())
+            clauses.append(textwrap.shorten(" ".join(d for d in detail if d), width=260, placeholder="..."))
+        if len(clauses) >= 5:
+            break
+    if clauses:
+        facts["clauses"] = clauses
+    hits = [kw for kw in WATCH_TERMS if kw.lower() in text.lower()]
+    if hits:
+        facts["hits"] = hits
+    return facts
 
 
 def collect_appstore_period(company: str, source: dict[str, Any], start: datetime, end_exclusive: datetime) -> list[dict[str, Any]]:
@@ -626,14 +700,20 @@ def collect_appstore_period(company: str, source: dict[str, Any], start: datetim
     dt = parse_iso_datetime(meta.get("currentVersionReleaseDate") or "")
     if not in_period(dt, start, end_exclusive):
         return []
+    notes = meta.get("releaseNotes") or ""
     return [{
         "company": company,
         "source": source["label"],
-        "kind": "App Store 앱 업데이트",
+        "source_type": "app",
+        "platform": "iOS",
+        "version": meta.get("version") or "",
+        "app_name": app_display_name(meta.get("trackName") or item.title),
+        "kind": "앱 업데이트",
         "date": dt.isoformat() if dt else "",
         "title": f"{meta.get('trackName') or item.title} v{meta.get('version') or ''}".strip(),
         "url": meta.get("trackViewUrl") or item.url,
-        "summary": summarize_body(meta.get("releaseNotes") or meta.get("description") or ""),
+        "summary": summarize_body(notes) if notes else "릴리즈노트 없음",
+        "body": notes,
     }]
 
 
@@ -644,7 +724,7 @@ def collect_google_play_period(company: str, source: dict[str, Any], start: date
     lines = item.normalized_text.splitlines()
     update_date = None
     release_notes = []
-    stop_markers = {"flag 부적절한 앱으로 신고", "개발자", "google store", "모두 vat 포함된 가격입니다.", "대한민국 (한국어)", "앱 지원", "개발자 소개"}
+    stop_markers = {"업데이트 날짜", "flag 부적절한 앱으로 신고", "개발자", "google store", "모두 vat 포함된 가격입니다.", "대한민국 (한국어)", "앱 지원", "개발자 소개"}
     for idx, line in enumerate(lines):
         if line == "업데이트 날짜" and idx + 1 < len(lines):
             update_date = parse_korean_date_line(lines[idx + 1])
@@ -656,15 +736,28 @@ def collect_google_play_period(company: str, source: dict[str, Any], start: date
                 release_notes.append(nxt)
     if not in_period(update_date, start, end_exclusive):
         return []
+    notes = "\n".join(release_notes)
     return [{
         "company": company,
         "source": source["label"],
-        "kind": "Google Play 앱 업데이트",
+        "source_type": "app",
+        "platform": "Android",
+        "version": "",
+        "app_name": app_display_name(item.title or source["label"]),
+        "kind": "앱 업데이트",
         "date": update_date.isoformat() if update_date else "",
         "title": item.title or source["label"],
         "url": item.url,
-        "summary": summarize_body("\n".join(release_notes) or item.text),
+        "summary": summarize_body(notes) if notes else "릴리즈노트 없음",
+        "body": notes,
     }]
+
+
+def app_display_name(title: str) -> str:
+    """'덧셈 - 세금 신고/환급 - Google Play 앱' 과 '덧셈 - 세금 신고/환급' 을 같은 이름으로."""
+    name = re.sub(r"\s*-\s*Google Play\s*앱\s*$", "", title or "").strip()
+    name = re.sub(r"\s+v?\d+(\.\d+)+\s*$", "", name).strip()
+    return name.split(" - ")[0].strip() or name
 
 
 def report_url() -> str:
@@ -689,78 +782,150 @@ def html_report_url() -> str:
     return "https://htmlpreview.github.io/?" + blob_url
 
 
+COMPETITORS = ["삼쩜삼", "덧셈컴퍼니", "비즈넵 환급"]
+SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+SEVERITY_ICON = {"HIGH": "🚨", "MEDIUM": "⚠️", "LOW": "ℹ️"}
+SEVERITY_KO = {"HIGH": "높음", "MEDIUM": "보통", "LOW": "낮음"}
+NEW_FEATURE_TERMS = ["새로운", "신규", "출시", "추가", "오픈", "도입", "새 기능", "런칭"]
+PROMO_TERMS = ["프로모션", "이벤트", "캠페인", "쿠폰", "무료"]
+
+
 def row_text(row: dict[str, Any]) -> str:
-    return " ".join(str(row.get(k, "")) for k in ["kind", "title", "summary", "source"])
+    return " ".join(str(row.get(k, "")) for k in ["kind", "title", "summary", "source", "body"])
+
+
+def has_any(text: str, terms: list[str]) -> list[str]:
+    low = (text or "").lower()
+    return [t for t in terms if t.lower() in low]
 
 
 def classify_ci_row(row: dict[str, Any]) -> tuple[str, str]:
-    text = row_text(row).lower()
-    if "app store" in text or "google play" in text or "앱 업데이트" in text:
-        category = "제품"
-    elif any(k in text for k in ["프로모션", "이벤트", "캠페인"]):
-        category = "프로모션"
-    elif any(k in text for k in ["세무조사", "종합소득세", "간이과세", "세금", "환급 사례", "콘텐츠", "신고"]):
-        category = "마케팅"
-    elif any(k in text for k in ["약관", "개인정보", "처리방침", "환불", "수수료"]):
-        category = "기타"
-    else:
-        category = "기타"
+    """구분·중요도. 돈·종료·개인정보 같은 '사람이 꼭 볼 말'을 콘텐츠/마케팅보다 먼저 본다."""
+    stype = row.get("source_type", "")
+    title_src = f"{row.get('title', '')} {row.get('source', '')}"
+    text = f"{row.get('title', '')}\n{row.get('body') or row.get('summary', '')}"
+    if stype == "app":
+        notes = row.get("body") or ""
+        if has_any(notes, MONEY_TERMS + STOP_TERMS):
+            return "제품(앱)", "MEDIUM"
+        if has_any(notes, NEW_FEATURE_TERMS):
+            return "제품(앱)", "MEDIUM"
+        return "제품(앱)", "LOW"
+    if has_any(text, STOP_TERMS):
+        return "서비스 종료·중단", "HIGH"
+    if has_any(text, MONEY_TERMS):
+        return "요금·결제", "HIGH"
+    if has_any(text, PRIVACY_TERMS):
+        return "개인정보·약관", "MEDIUM"
+    if has_any(title_src, ["약관", "이용규칙", "정책"]):
+        return "약관", "MEDIUM"
+    if has_any(text, PROMO_TERMS) or "할인" in text:
+        return "프로모션", "MEDIUM"
+    if stype == "page":
+        return "홈페이지 문구", "LOW"
+    return "콘텐츠·일반 공지", "LOW"
 
-    # HIGH is reserved for direct pricing/revenue/customer-churn/core-position impact.
-    if any(k in text for k in ["서비스 종료", "서비스 중단", "수수료 변경", "가격 변경", "환불 정책"]):
-        severity = "HIGH"
-    elif any(k in text for k in ["개인정보", "처리방침", "약관", "서비스 확대", "제3자"]) or ("전체" in text and "탭" in text):
-        severity = "MEDIUM"
-    elif "앱 업데이트" in text and any(k in text for k in ["사용성", "오류", "버그", "개선"]):
-        severity = "LOW"
-    elif category == "마케팅":
-        severity = "LOW"
-    else:
-        severity = "LOW"
-    return category, severity
 
 def impact_for(row: dict[str, Any], category: str, severity: str) -> str:
-    text = row_text(row)
-    if "개인정보" in text or "처리방침" in text or "제3자" in text:
-        return "개인정보 제공/활용 범위 변화는 환급 서비스 신뢰도와 동의 UX에 영향을 줄 수 있어 약관·동의 플로우 비교 확인이 필요합니다."
-    if "전체" in text and "탭" in text:
-        return "앱 내 서비스 탐색 구조를 넓히는 변화로, 환급 외 부가 서비스 노출·교차판매 UX 강화 가능성이 있습니다."
-    if "사용성" in text or "오류" in text or "버그" in text:
-        return "직접적인 포지션 변화는 제한적이나, 신청/조회 과정의 이탈률 개선 경쟁으로 이어질 수 있습니다."
-    if category == "마케팅":
-        return "세무 정보성 콘텐츠를 통한 SEO/신뢰 확보 활동으로 보이며, 즉각적 기능 변화보다는 상단 퍼널 유입 경쟁 측면에서 참고가 필요합니다."
-    return "우리 서비스에 대한 직접 영향은 현재 데이터만으로 확인 필요합니다."
+    c = row.get("company", "경쟁사")
+    if category == "요금·결제" and row.get("source_type") == "page":
+        return (f"{c} 홈페이지의 요금·할인·환급 관련 문구가 바뀌었습니다. 고객에게 내세우는 조건이 달라졌을 수 있어 "
+                "세이브택스 환급의 수수료·혜택 안내와 비교가 필요합니다.")
+    if category == "요금·결제":
+        return (f"{c}에서 이용료·결제 조건을 바꿨습니다. 고객이 두 서비스를 비교할 때 바로 보는 조건이라, "
+                "세이브택스 환급의 수수료율·출금 시점·환불 기준과 나란히 놓고 차이를 확인해야 합니다.")
+    if category == "서비스 종료·중단":
+        return f"{c} 서비스 일부가 종료·중단됩니다. 해당 고객이 대체 서비스를 찾는 시점이라 유입 기회가 될 수 있습니다."
+    if category == "개인정보·약관":
+        return f"{c}의 개인정보 제공·위탁 범위가 바뀌었습니다. 세이브택스 환급의 동의 화면·고지 문구와 차이를 확인해야 합니다."
+    if category == "약관":
+        return f"{c} 약관이 바뀌었습니다. 바뀐 조항이 고객 책임·환불·서비스 범위에 닿는지 확인이 필요합니다."
+    if category == "프로모션":
+        return f"{c}에서 할인·이벤트를 시작했습니다. 같은 기간 우리 유입·전환이 흔들리는지 지표를 함께 보세요."
+    if category == "제품(앱)" and severity != "LOW":
+        return f"{c} 앱에 새 기능 또는 조건 변경이 들어갔습니다. 환급 조회·신청 흐름에 닿는 기능인지 실제 앱에서 확인이 필요합니다."
+    if category == "제품(앱)":
+        return f"{c} 앱의 작은 개선·오류 수정입니다. 릴리즈노트만으로는 바뀐 화면을 알 수 없어 영향은 작게 봅니다."
+    if category == "홈페이지 문구":
+        return f"{c} 홈페이지 문구가 바뀌었습니다. 내세우는 혜택·숫자가 달라졌는지 바뀐 줄을 확인하세요."
+    return f"{c}의 일반 공지·콘텐츠입니다. 직접 영향은 작고 참고용입니다."
 
 
 def action_for(row: dict[str, Any], category: str, severity: str) -> str:
-    text = row_text(row)
-    if "개인정보" in text or "처리방침" in text or "제3자" in text:
-        return "삼쩜삼 개인정보 처리방침 개정 전후 조항을 비교하고, 세이브택스 환급의 개인정보 동의·제3자 제공 고지와 차이를 점검합니다."
-    if "전체" in text and "탭" in text:
-        return "비즈넵 앱의 신규 정보구조를 실제 앱 화면 기준으로 확인하고, 환급 외 부가 서비스 노출 방식과 온보딩 흐름을 캡처합니다."
-    if "사용성" in text or "오류" in text or "버그" in text:
-        return "덧셈/비즈넵의 최신 앱 버전을 설치해 환급 조회·신청 핵심 플로우의 단계 수와 이탈 지점을 비교합니다."
-    if category == "마케팅":
-        return "동일 키워드군의 검색 노출 현황을 확인하고, 세이브택스 콘텐츠/랜딩에서 보강할 주제를 선별합니다."
-    return "변화의 실제 서비스 영향 여부를 추가 확인합니다."
+    c = row.get("company", "경쟁사")
+    if category == "요금·결제" and row.get("source_type") == "page":
+        return f"{c} 홈페이지 바뀐 요금·혜택 문구 캡처, 우리 안내와 비교"
+    if category == "요금·결제":
+        return f"{c} 공지의 바뀐 조항을 우리 수수료·출금·환불 정책과 표로 비교"
+    if category == "서비스 종료·중단":
+        return f"{c} 종료 대상 고객층·시점 확인, 우리 안내 문구·유입 채널 검토"
+    if category == "개인정보·약관":
+        return f"{c} 처리방침 바뀐 조항과 우리 동의·제3자 제공 고지 비교"
+    if category == "약관":
+        return f"{c} 약관 바뀐 조항 전·후 비교"
+    if category == "프로모션":
+        return f"{c} 프로모션 조건·기간 기록, 같은 기간 유입 지표 확인"
+    if category == "제품(앱)" and severity != "LOW":
+        return f"{c} 최신 앱 설치 후 새 기능 화면 캡처"
+    if category == "홈페이지 문구":
+        return f"{c} 홈페이지 바뀐 문구 캡처·기록"
+    return "조치 불필요(관찰만)"
 
 
-def previous_change_text(row: dict[str, Any]) -> str:
-    if row.get("kind", "").endswith("앱 업데이트") or "앱 업데이트" in row.get("kind", ""):
-        return "해당 기간 내 앱 버전/릴리즈노트 업데이트로 확인. 직전 버전 대비 상세 화면 변화는 확인 필요."
-    return "해당 기간 내 게시글 신규/수정으로 확인. 이전 리포트와의 신규/변경/지속 이슈 구분은 이전 리포트 데이터 확인 필요."
+def short_date(value: str) -> str:
+    return (value or "")[:10]
+
+
+def date_text(row: dict[str, Any]) -> str:
+    stype = row.get("source_type")
+    if stype == "notice":
+        if row.get("kind") == "새 공지":
+            return f"게시 {short_date(row.get('date'))}"
+        return f"본문 수정 {short_date(row.get('date'))} (첫 게시 {short_date(row.get('created'))})"
+    if stype == "app":
+        return f"업데이트 {short_date(row.get('date'))}"
+    if stype == "page":
+        base = short_date(row.get("baseline_at")) or "확인 필요"
+        return f"확인 {short_date(row.get('date'))} (직전 저장본 {base} 대비)"
+    return short_date(row.get("date"))
+
+
+def fact_lines(row: dict[str, Any], limit: int = 3) -> list[str]:
+    """사람이 바로 읽을 '무엇이 바뀌었나' 줄."""
+    out: list[str] = []
+    facts = row.get("facts") or {}
+    if facts.get("announced") or facts.get("effective"):
+        out.append(" · ".join(x for x in [
+            f"공고 {facts['announced']}" if facts.get("announced") else "",
+            f"시행 {facts['effective']}" if facts.get("effective") else "",
+        ] if x))
+    for clause in (facts.get("clauses") or [])[:limit]:
+        out.append(clause)
+    diff = row.get("diff") or {}
+    for line in (diff.get("added") or [])[:limit]:
+        out.append(f"+ {line}")
+    for line in (diff.get("removed") or [])[: max(1, limit - 1)]:
+        out.append(f"− {line}")
+    if row.get("source_type") == "app":
+        out.append(f"릴리즈노트: {textwrap.shorten(row.get('summary') or '', width=160, placeholder='...')}")
+    if not out:
+        out.append(textwrap.shorten(row.get("summary") or "세부 내용은 출처 확인 필요", width=200, placeholder="..."))
+    return out
 
 
 def evidence_line(row: dict[str, Any], check_date: str) -> str:
     return f"{row.get('url')} (확인일: {check_date})"
 
 
-def build_competitor_data(config: dict[str, Any], date_from: str, date_to: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+def build_competitor_data(config: dict[str, Any], date_from: str, date_to: str, state: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[str], list[str], dict[str, Any]]:
     start = parse_date_start(date_from)
     end_exclusive = parse_date_end_exclusive(date_to)
     rows: list[dict[str, Any]] = []
-    skipped: list[str] = []
+    notes: list[str] = []
     errors: list[str] = []
+    old_sources = (state or {}).get("sources", {})
+    new_sources: dict[str, Any] = dict(old_sources)
+    check_date = datetime.now(timezone.utc).date().isoformat()
 
     for company_cfg in config["companies"]:
         company = company_cfg["name"]
@@ -773,85 +938,127 @@ def build_competitor_data(config: dict[str, Any], date_from: str, date_to: str) 
                     collected = collect_appstore_period(company, source, start, end_exclusive)
                 elif source["type"] == "webpage" and "play.google.com/store/apps/details" in source.get("url", ""):
                     collected = collect_google_play_period(company, source, start, end_exclusive)
-                else:
-                    skipped.append(f"{company} / {source['label']}: 날짜 필터 가능한 공개 메타데이터가 없어 정기 스냅샷 비교 대상")
-                for row in collected:
-                    category, severity = classify_ci_row(row)
-                    row["category"] = category
-                    row["severity"] = severity
-                    rows.append(row)
+                elif source["type"] == "webpage":
+                    collected, record, note = collect_page_change(company, source, old_sources.get(source["id"]), check_date)
+                    if record:
+                        new_sources[source["id"]] = record
+                    if note:
+                        notes.append(note)
+                rows.extend(collected)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{company} / {source['label']}: {e!r}")
+            time.sleep(1.0)  # 사이트별 요청 간격 1초 이상
 
     rows.sort(key=lambda r: (r.get("date", ""), r.get("company", ""), r.get("source", "")))
-    return rows, skipped, errors
+    new_state = {"updated_at": now_iso(), "sources": new_sources}
+    return rows, notes, errors, new_state
+
+
+def looks_broken(text: str) -> bool:
+    """예전 실행(인코딩 깨짐)으로 저장된 기준본은 비교에 쓰지 않는다."""
+    return not text or "�" in text[:3000] or len(text) < 40
+
+
+def collect_page_change(company: str, source: dict[str, Any], old: dict[str, Any] | None, check_date: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str]:
+    """날짜가 없는 홈페이지·약관 페이지는 직전 저장본과 줄 단위로 비교한다."""
+    item = fetch_webpage(company, source)
+    if not item.ok:
+        raise RuntimeError(item.error)
+    record = state_record(item)
+    if len(item.normalized_text) < 40:
+        return [], record, f"{company} / {source['label']}: 화면을 스크립트로 그려 본문을 읽을 수 없음(비교 불가)"
+    old_text = (old or {}).get("normalized_text", "")
+    if not old or looks_broken(old_text):
+        return [], record, f"{company} / {source['label']}: 비교 기준을 새로 저장함(다음 주부터 문구 변경 감지)"
+    if old.get("digest") == item.digest:
+        return [], record, ""
+    old_set = set(old_text.splitlines())
+    new_lines = item.normalized_text.splitlines()
+    new_set = set(new_lines)
+    added = [l for l in new_lines if l not in old_set and len(l) >= 6]
+    removed = [l for l in old_text.splitlines() if l not in new_set and len(l) >= 6]
+    if not added and not removed:
+        return [], record, ""
+    title = f"{source['label']} 문구 변경 (+{len(added)}줄 / −{len(removed)}줄)"
+    if len(added) + len(removed) > 60:
+        title = f"{source['label']} 대규모 변경 (+{len(added)}줄 / −{len(removed)}줄, 개편 가능성)"
+    row = {
+        "company": company,
+        "source": source["label"],
+        "source_type": "page",
+        "kind": "페이지 문구 변경",
+        "date": check_date,
+        "baseline_at": old.get("last_seen_at", ""),
+        "title": title,
+        "url": item.url,
+        "summary": textwrap.shorten(" / ".join(added[:3] or removed[:3]), width=300, placeholder="..."),
+        "body": "\n".join(added + removed),
+        "diff": {"added": [textwrap.shorten(l, 140, placeholder="...") for l in added[:8]],
+                 "removed": [textwrap.shorten(l, 140, placeholder="...") for l in removed[:8]]},
+    }
+    hits = has_any(row["body"], WATCH_TERMS)
+    if hits:
+        row["facts"] = {"hits": hits}
+    return [row], record, ""
 
 
 def merge_key(row: dict[str, Any]) -> tuple[str, str, str]:
     title = re.sub(r"\s+", " ", row.get("title", "")).strip().lower()
-    return (row.get("company", ""), row.get("category", ""), title)
-
-
-def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = merge_key(row)
-        if key not in seen:
-            seen[key] = row
-            continue
-        # Merge source URLs if duplicated across App Store / Play Store etc.
-        existing = seen[key]
-        if row.get("url") and row["url"] not in existing.get("url", ""):
-            existing["url"] = existing.get("url", "") + " / " + row["url"]
-    return list(seen.values())
+    return (row.get("company", ""), row.get("source_type", ""), title)
 
 
 def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge repeated low-level content updates into one competitor-level item."""
-    deduped = dedupe_rows(rows)
-    marketing_groups: dict[str, list[dict[str, Any]]] = {}
-    others: list[dict[str, Any]] = []
-    for row in deduped:
-        if row.get("category") == "마케팅" and row.get("company") == "비즈넵 환급":
-            marketing_groups.setdefault(row["company"], []).append(row)
-        else:
-            others.append(row)
-
-    for company, group in marketing_groups.items():
-        if len(group) == 1:
-            others.extend(group)
+    """같은 앱의 iOS·Android 업데이트를 한 줄로 합치고, 구분·중요도를 붙인다."""
+    merged: list[dict[str, Any]] = []
+    apps: dict[tuple[str, str, str], dict[str, Any]] = {}
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        row = dict(row)
+        if row.get("source_type") == "app":
+            # 같은 주에 같은 앱이 iOS·Android 둘 다 올라오면 한 줄로(릴리즈노트가 다르면 둘 다 남김).
+            key = (row.get("company", ""), row.get("app_name", ""), "")
+            label = f"{row['platform']} v{row['version']}" if row.get("version") else row.get("platform", "")
+            if key in apps:
+                ex = apps[key]
+                ex["platforms"].append(label)
+                ex["links"].append((row.get("platform", "링크"), row.get("url", "")))
+                ex["date"] = max(ex.get("date", ""), row.get("date", ""))
+                if row.get("summary") and row["summary"] not in ex.get("summary", ""):
+                    ex["summary"] = f"{ex.get('summary', '')} / ({row.get('platform')}) {row['summary']}"
+                    ex["body"] = f"{ex.get('body', '')}\n{row.get('body', '')}"
+                continue
+            row["platforms"] = [label]
+            row["links"] = [(row.get("platform", "링크"), row.get("url", ""))]
+            apps[key] = row
+            merged.append(row)
             continue
-        group.sort(key=lambda r: r.get("date", ""))
-        titles = [r.get("title", "") for r in group]
-        urls = [r.get("url", "") for r in group if r.get("url")]
-        others.append({
-            "company": company,
-            "source": "고객센터/공지/약관",
-            "kind": "세무 정보성 콘텐츠 업데이트",
-            "date": group[0].get("date", ""),
-            "title": f"세무 정보성 콘텐츠 {len(group)}건 업데이트",
-            "url": " / ".join(urls[:5]),
-            "summary": "업데이트 제목: " + "; ".join(titles),
-            "category": "마케팅",
-            "severity": "LOW",
-        })
-    return others
+        key = merge_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        row["links"] = [("원문", row.get("url", ""))]
+        merged.append(row)
+    for row in merged:
+        if row.get("source_type") == "app":
+            row["title"] = f"{row.get('app_name') or row['company']} 앱 업데이트 ({' · '.join(row['platforms'])})"
+            row["url"] = " / ".join(u for _, u in row["links"] if u)
+        category, severity = classify_ci_row(row)
+        row["category"] = category
+        row["severity"] = severity
+    merged.sort(key=lambda r: (SEVERITY_RANK.get(r["severity"], 9), r.get("company", ""), r.get("date", "")))
+    return merged
 
 
 def executive_summary(rows: list[dict[str, Any]], competitors: list[str]) -> list[str]:
     if not rows:
         return ["이번 기간 확인된 주요 변화는 없습니다."]
-    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    top = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("date", "")))[:3]
     bullets = []
-    for row in top:
-        why = impact_for(row, row.get("category", "기타"), row.get("severity", "LOW"))
-        bullets.append(f"{row['company']}에서 {row['title']} 변화가 확인되었습니다. 중요도는 {row['severity']}이며, 우리에게 중요한 이유는 {why}")
-    active = sorted({r["company"] for r in rows})
-    quiet = [c for c in competitors if c not in active]
+    for row in rows[:3]:
+        bullets.append(f"[{SEVERITY_KO[row['severity']]}] {row['company']} · {row['title']} — {impact_for(row, row['category'], row['severity'])}")
+    quiet = [c for c in competitors if c not in {r["company"] for r in rows}]
     if quiet:
-        bullets.append(f"{', '.join(quiet)}는 날짜 메타데이터 기준 주요 업데이트가 확인되지 않았습니다. 억지 인사이트 없이 지속 모니터링합니다.")
-    return bullets[:3]
+        bullets.append(f"{', '.join(quiet)}: 이번 기간 감지된 변화 없음.")
+    return bullets
 
 
 def split_urls(value: str) -> list[str]:
@@ -863,44 +1070,53 @@ def split_urls(value: str) -> list[str]:
     return urls
 
 
-def first_url(value: str) -> str:
-    urls = split_urls(value)
-    return urls[0] if urls else ""
+def slack_escape(text: str) -> str:
+    return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def slack_link(url: str, label: str = "근거") -> str:
     return f"<{url}|{label}>" if url else "근거 확인 필요"
 
 
-def html_links(value: str) -> str:
-    urls = split_urls(value)
-    if not urls:
+def slack_links(row: dict[str, Any]) -> str:
+    links = [slack_link(u, lbl) for lbl, u in row.get("links", []) if u]
+    return " · ".join(links) or "근거 확인 필요"
+
+
+def html_links(row: dict[str, Any]) -> str:
+    links = [(lbl, u) for lbl, u in row.get("links", []) if u]
+    if not links:
         return '<span class="muted">확인 필요</span>'
-    return "".join(
-        f'<a href="{html.escape(u)}" target="_blank" rel="noopener">근거 {idx}</a>'
-        for idx, u in enumerate(urls, start=1)
-    )
+    return "".join(f'<a href="{html.escape(u)}" target="_blank" rel="noopener">{html.escape(lbl)}</a>' for lbl, u in links)
 
 
 def badge_class(severity: str) -> str:
     return {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}.get(severity, "low")
 
 
-def build_html_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors: list[str], date_from: str, date_to: str) -> str:
+def actions_for_rows(rows: list[dict[str, Any]]) -> list[str]:
+    actions: list[str] = []
+    for row in rows:
+        if row["severity"] == "LOW":
+            continue
+        a = action_for(row, row["category"], row["severity"])
+        if a not in actions:
+            actions.append(a)
+    return actions
+
+
+def build_html_ci_report(rows: list[dict[str, Any]], notes: list[str], errors: list[str], date_from: str, date_to: str) -> str:
     period = f"{date_from} ~ {date_to}"
     check_date = datetime.now(timezone.utc).date().isoformat()
-    rows = aggregate_rows(rows)
-    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    ordered = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("company", ""), r.get("date", "")))
-    top = ordered[:3]
-    competitors = ["삼쩜삼", "덧셈컴퍼니", "비즈넵 환급"]
+    ordered = aggregate_rows(rows)
+    counts = {s: sum(1 for r in ordered if r["severity"] == s) for s in SEVERITY_RANK}
 
     cards: list[str] = []
     for row in ordered:
-        category = row.get("category", "기타")
-        severity = row.get("severity", "LOW")
-        impact = impact_for(row, category, severity)
-        action = action_for(row, category, severity)
+        category, severity = row["category"], row["severity"]
+        facts = "".join(f"<li>{html.escape(x)}</li>" for x in fact_lines(row, limit=5))
+        hits = (row.get("facts") or {}).get("hits") or []
+        hits_html = f"<div class='tiny'>감지한 말: {html.escape(', '.join(hits))}</div>" if hits else ""
         cards.append(f"""
         <article class="card">
           <div class="card-head">
@@ -908,42 +1124,31 @@ def build_html_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors:
               <div class="company">{html.escape(row.get('company', ''))}</div>
               <h3>{html.escape(row.get('title', ''))}</h3>
             </div>
-            <span class="badge {badge_class(severity)}">{html.escape(severity)}</span>
+            <span class="badge {badge_class(severity)}">{SEVERITY_KO[severity]}</span>
           </div>
-          <div class="meta"><span>🏷️ {html.escape(category)}</span><span>📅 {html.escape((row.get('date') or '')[:10] or check_date)}</span></div>
-          <div class="block"><strong>확인된 사실</strong><p>{html.escape(row.get('kind', ''))} · {html.escape(row.get('summary') or '세부 내용은 출처 확인 필요')}</p></div>
+          <div class="meta"><span>🏷️ {html.escape(category)}</span><span>📅 {html.escape(date_text(row))}</span><span>📂 {html.escape(row.get('source', ''))}</span></div>
+          <div class="block"><strong>무엇이 바뀌었나</strong><ul>{facts}</ul>{hits_html}</div>
           <div class="grid-two">
-            <div class="block"><strong>사업 영향</strong><p>{html.escape(impact)}</p></div>
-            <div class="block"><strong>권장 대응</strong><p>{html.escape(action)}</p></div>
+            <div class="block"><strong>우리에게 미치는 영향</strong><p>{html.escape(impact_for(row, category, severity))}</p></div>
+            <div class="block"><strong>권장 대응</strong><p>{html.escape(action_for(row, category, severity))}</p></div>
           </div>
-          <div class="sources">🔗 {html_links(row.get('url', ''))}</div>
+          <div class="sources">🔗 {html_links(row)}</div>
         </article>""")
 
-    summary_items: list[str] = []
-    for row in top:
-        severity = row.get("severity", "LOW")
-        summary_items.append(f"""
-        <li>
-          <span class="badge {badge_class(severity)}">{html.escape(severity)}</span>
-          <strong>{html.escape(row.get('company', ''))}</strong> · {html.escape(row.get('title', ''))}
-          <p>{html.escape(impact_for(row, row.get('category', '기타'), severity))}</p>
-        </li>""")
-    if not summary_items:
-        summary_items.append('<li>이번 기간 입력 데이터 기준 주요 변화가 확인되지 않았습니다.</li>')
-
     competitor_sections: list[str] = []
-    for comp in competitors:
+    for comp in COMPETITORS:
         comp_rows = [r for r in ordered if r.get("company") == comp]
         if comp_rows:
-            items = "".join(f"<li>{html.escape(r.get('title',''))} <span class='tiny'>({html.escape(r.get('severity','LOW'))})</span></li>" for r in comp_rows)
+            items = "".join(f"<li>{html.escape(r['title'])} <span class='tiny'>({SEVERITY_KO[r['severity']]} · {html.escape(r['category'])})</span></li>" for r in comp_rows)
             body = f"<ul>{items}</ul>"
         else:
-            body = "<p class='muted'>이번 기간 날짜 메타데이터 기준 신규/변경 활동 확인 없음.</p>"
+            body = "<p class='muted'>이번 기간 감지된 변화 없음.</p>"
         competitor_sections.append(f"<section class='mini'><h3>{html.escape(comp)}</h3>{body}</section>")
 
-    skipped_html = "".join(f"<li>{html.escape(x)}</li>" for x in skipped) or "<li>없음</li>"
+    actions_html = "".join(f"<li>{html.escape(a)}</li>" for a in actions_for_rows(ordered)) or "<li>이번 주 바로 할 일 없음(관찰만)</li>"
+    notes_html = "".join(f"<li>{html.escape(x)}</li>" for x in notes) or "<li>없음</li>"
     errors_html = "".join(f"<li>{html.escape(x)}</li>" for x in errors) or "<li>없음</li>"
-    cards_html = "".join(cards) if cards else '<div class="card">주요 변화 없음</div>'
+    cards_html = "".join(cards) if cards else '<div class="card">이번 기간 감지된 변화 없음</div>'
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -962,14 +1167,14 @@ def build_html_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors:
     .stat {{ background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18); padding:12px 16px; border-radius:14px; }}
     main {{ padding:28px; }} section {{ margin:0 0 28px; }} h2 {{ font-size:22px; letter-spacing:-.03em; margin:0 0 14px; }}
     .summary, .mini, .card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 28px rgba(15,23,42,.06); }}
-    .summary {{ padding:22px 24px; }} .summary li {{ margin:0 0 14px; }} .summary p {{ margin:4px 0 0 0; color:var(--muted); }}
+    .summary {{ padding:22px 24px; }} .summary li {{ margin:0 0 10px; }}
     .cards {{ display:grid; grid-template-columns:1fr; gap:18px; }} .card {{ padding:22px; }}
     .card-head {{ display:flex; justify-content:space-between; gap:18px; align-items:flex-start; }}
     .company {{ color:var(--blue); font-weight:800; font-size:14px; margin-bottom:4px; }} h3 {{ margin:0; font-size:20px; letter-spacing:-.025em; }}
     .meta {{ display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); margin:12px 0 16px; font-size:14px; }}
     .badge {{ display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-weight:800; font-size:12px; color:#fff; white-space:nowrap; }}
     .badge.high {{ background:var(--red); }} .badge.medium {{ background:var(--amber); }} .badge.low {{ background:var(--green); }}
-    .block {{ background:#f8fafc; border:1px solid #edf2f7; border-radius:14px; padding:14px; margin:10px 0; }} .block strong {{ display:block; margin-bottom:6px; }} .block p {{ margin:0; }}
+    .block {{ background:#f8fafc; border:1px solid #edf2f7; border-radius:14px; padding:14px; margin:10px 0; }} .block strong {{ display:block; margin-bottom:6px; }} .block p {{ margin:0; }} .block ul {{ margin:0; padding-left:18px; }}
     .grid-two {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }} .sources {{ margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     a {{ color:#1d4ed8; font-weight:700; text-decoration:none; background:#eff6ff; padding:4px 8px; border-radius:8px; }}
     .competitors {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }} .mini {{ padding:18px; }} .mini ul {{ padding-left:18px; }} .muted {{ color:var(--muted); }} .tiny {{ color:var(--muted); font-size:12px; }}
@@ -979,190 +1184,144 @@ def build_html_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors:
 <body>
   <header class="hero"><div class="wrap">
     <h1>📊 {html.escape(period)} 경쟁사 동향 리포트</h1>
-    <p>세이브택스 환급 관점에서 앱 업데이트, 약관/공지, 콘텐츠 활동을 사업 영향 중심으로 요약했습니다.</p>
+    <p>앱 업데이트 · 공지/약관 본문 수정 · 홈페이지 문구 변경을 세이브택스 환급 관점에서 정리했습니다.</p>
     <div class="stats">
       <div class="stat">🗓️ 작성 기준일<br><strong>{html.escape(check_date)}</strong></div>
-      <div class="stat">🏢 분석 대상<br><strong>삼쩜삼 · 덧셈컴퍼니 · 비즈넵 환급</strong></div>
-      <div class="stat">🔎 주요 변화<br><strong>{len(ordered)}건</strong></div>
+      <div class="stat">🏢 분석 대상<br><strong>{' · '.join(COMPETITORS)}</strong></div>
+      <div class="stat">🔎 감지<br><strong>{len(ordered)}건 (높음 {counts['HIGH']} · 보통 {counts['MEDIUM']} · 낮음 {counts['LOW']})</strong></div>
     </div>
   </div></header>
   <main class="wrap">
-    <section><h2>1. Executive Summary</h2><div class="summary"><ul>{''.join(summary_items)}</ul></div></section>
-    <section><h2>2. 주요 변화</h2><div class="cards">{cards_html}</div></section>
-    <section><h2>3. 경쟁사별 상세 분석</h2><div class="competitors">{''.join(competitor_sections)}</div></section>
-    <section><h2>4. 권장 액션</h2><div class="summary"><ul>
-      <li><strong>개인정보/약관 변경 비교</strong> — 동의 UX와 제3자 제공 고지 수준 점검</li>
-      <li><strong>최신 앱 플로우 캡처</strong> — 환급 조회·신청 UX 차이 확인</li>
-      <li><strong>세무 콘텐츠 키워드 비교</strong> — SEO/랜딩 보강 주제 도출</li>
-    </ul></div></section>
-    <section><h2>5. 참고 및 수집 상태</h2><div class="summary"><strong>날짜 필터 미지원 소스</strong><ul>{skipped_html}</ul><strong>수집 오류</strong><ul>{errors_html}</ul></div></section>
+    <section><h2>1. 이번 주 바뀐 것</h2><div class="cards">{cards_html}</div></section>
+    <section><h2>2. 경쟁사별 한눈에</h2><div class="competitors">{''.join(competitor_sections)}</div></section>
+    <section><h2>3. 확인할 일</h2><div class="summary"><ul>{actions_html}</ul></div></section>
+    <section><h2>4. 수집 상태</h2><div class="summary"><strong>참고</strong><ul>{notes_html}</ul><strong>수집 오류</strong><ul>{errors_html}</ul></div></section>
   </main>
-  <footer>Generated by SaveTax competitor monitor · Source facts only · Unknowns marked as 확인 필요</footer>
+  <footer>공지는 본문 수정 시각(edited_at) 기준 · 홈페이지·약관은 직전 저장본과 줄 단위 비교 · 모르는 것은 「확인 필요」로 표시</footer>
 </body>
 </html>"""
 
 
-def build_detailed_ci_report(rows: list[dict[str, Any]], skipped: list[str], errors: list[str], date_from: str, date_to: str) -> str:
+def build_detailed_ci_report(rows: list[dict[str, Any]], notes: list[str], errors: list[str], date_from: str, date_to: str) -> str:
     period = f"{date_from} ~ {date_to}"
     check_date = datetime.now(timezone.utc).date().isoformat()
-    competitors = ["삼쩜삼", "덧셈컴퍼니", "비즈넵 환급"]
-    our_company = "세이브택스 환급"
-    focus = "앱 서비스 업데이트, 주요 홈페이지 변경, 약관/공지 변경"
-    url = report_url()
-    rows = aggregate_rows(rows)
-
+    ordered = aggregate_rows(rows)
     lines: list[str] = [
         f"# {period} 경쟁사 동향 리포트",
         "",
         "## 리포트 정보",
         f"- 리포트 기간: {period}",
         f"- 작성 기준일: {check_date}",
-        f"- 분석 대상 경쟁사: {', '.join(competitors)}",
-        f"- 우리 회사/서비스: {our_company}",
-        f"- 주요 관심 영역: {focus}",
-        "- 이전 리포트: 확인 필요",
-        f"- 상세 리포트 URL: {url}",
+        f"- 분석 대상 경쟁사: {', '.join(COMPETITORS)}",
+        f"- 실행 기록: {report_url()}",
         "",
-        "## 1. Executive Summary",
+        "## 1. 요약",
     ]
-    for bullet in executive_summary(rows, competitors):
-        lines.append(f"- {bullet}")
-    lines += ["", "## 2. 주요 변화"]
-
-    if not rows:
-        lines += ["- 이번 기간 입력 데이터 기준 주요 변화가 확인되지 않았습니다.", ""]
-    else:
-        severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        for row in sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("company", ""), r.get("date", ""))):
-            category = row.get("category", "기타")
-            severity = row.get("severity", "LOW")
-            lines += [
-                f"### [{row['company']}] {row['title']}",
-                f"- 구분: {category}",
-                f"- 중요도: {severity}",
-                f"- 확인된 사실: {row['kind']}가 확인되었습니다. {row.get('summary') or '세부 내용은 출처 확인 필요'}",
-                f"- 이전 대비 변화: {previous_change_text(row)}",
-                f"- 우리에게 미치는 영향: {impact_for(row, category, severity)}",
-                f"- 권장 대응: {action_for(row, category, severity)}",
-                f"- 출처: {evidence_line(row, check_date)}",
-                f"- 확인일: {check_date}",
-                "",
-            ]
-
-    lines += ["## 3. 경쟁사별 상세 분석"]
-    for comp in competitors:
-        comp_rows = [r for r in rows if r.get("company") == comp]
-        lines += ["", f"### {comp}"]
-        if not comp_rows:
-            lines.append("- 주요 활동: 이번 기간 날짜 메타데이터 기준 신규/변경 활동 확인 없음.")
-            lines.append("- 방향성: 확인 필요.")
-            lines.append("- 반복 패턴: 확인 필요.")
-            continue
-        cats = sorted({r.get("category", "기타") for r in comp_rows})
-        lines.append(f"- 주요 활동: {len(comp_rows)}건 확인 ({', '.join(cats)}).")
-        if any("앱 업데이트" in r.get("kind", "") for r in comp_rows):
-            lines.append("- 방향성: 앱 사용성 또는 정보구조 개선 활동이 관찰됨.")
-        elif any(r.get("category") == "마케팅" for r in comp_rows):
-            lines.append("- 방향성: 세무 정보성 콘텐츠를 통한 유입/신뢰 확보 활동이 관찰됨.")
-        else:
-            lines.append("- 방향성: 확인 필요.")
-        pattern_titles = "; ".join(r["title"] for r in comp_rows[:3])
-        lines.append(f"- 반복 패턴: {pattern_titles}")
-
-    lines += ["", "## 4. 시사점"]
-    if rows:
+    lines += [f"- {b}" for b in executive_summary(ordered, COMPETITORS)]
+    lines += ["", "## 2. 이번 주 바뀐 것"]
+    if not ordered:
+        lines += ["- 이번 기간 감지된 변화가 없습니다.", ""]
+    for row in ordered:
+        category, severity = row["category"], row["severity"]
         lines += [
-            "- 기회 요인: 경쟁사의 약관/앱 UX/콘텐츠 변화를 기준으로 세이브택스 환급의 신뢰 고지, 신청 UX, 정보성 콘텐츠 차별화 포인트를 점검할 수 있습니다.",
-            "- 위협 요인: 앱 정보구조 개선과 세무 콘텐츠 확장은 환급 서비스 탐색성·상단 퍼널 경쟁을 강화할 수 있습니다.",
-            "- 추가 확인이 필요한 사항: 실제 앱 화면 변화, 약관 개정 전후 조항, 홈페이지/약관 정적 페이지의 문구 변경 여부는 추가 수동 확인이 필요합니다.",
+            f"### [{SEVERITY_KO[severity]}] {row['company']} · {row['title']}",
+            f"- 구분: {category} · {row.get('kind', '')}",
+            f"- 날짜: {date_text(row)}",
+            "- 무엇이 바뀌었나:",
+            *[f"  - {x}" for x in fact_lines(row, limit=5)],
         ]
-    else:
+        hits = (row.get("facts") or {}).get("hits") or []
+        if hits:
+            lines.append(f"- 감지한 말: {', '.join(hits)}")
         lines += [
-            "- 기회 요인: 확인 필요.",
-            "- 위협 요인: 확인된 주요 변화 없음.",
-            "- 추가 확인이 필요한 사항: 날짜 메타데이터가 없는 홈페이지/약관 페이지는 정기 스냅샷 비교로 보완 필요.",
-        ]
-
-    actions: list[tuple[str, str, str, str, str]] = []
-    if any("개인정보" in row_text(r) or "처리방침" in row_text(r) for r in rows):
-        actions.append(("삼쩜삼 개인정보 처리방침 개정 조항 비교", "동의/제3자 제공 고지 경쟁 수준 파악", "HIGH", "Product/Legal", "1주 이내"))
-    if any("앱 업데이트" in r.get("kind", "") for r in rows):
-        actions.append(("경쟁사 최신 앱 플로우 캡처", "환급 조회·신청 UX 차이 확인", "MEDIUM", "Product/Design", "1주 이내"))
-    if any(r.get("category") == "마케팅" for r in rows):
-        actions.append(("세무 정보성 콘텐츠 키워드 비교", "SEO/랜딩 콘텐츠 보강 주제 도출", "MEDIUM", "Marketing/Growth", "2주 이내"))
-    if not actions:
-        actions.append(("정기 모니터링 유지", "의미 있는 변화 발생 시 대응", "LOW", "Growth", "다음 정기 리포트"))
-
-    lines += ["", "## 5. 권장 액션"]
-    for idx, (item, purpose, priority, owner, due) in enumerate(actions, start=1):
-        lines += [
-            f"### {idx}. {item}",
-            f"- 실행 항목: {item}",
-            f"- 실행 목적: {purpose}",
-            f"- 우선순위: {priority}",
-            f"- 권장 담당 조직: {owner}",
-            f"- 권장 완료 시점: {due}",
+            f"- 우리에게 미치는 영향: {impact_for(row, category, severity)}",
+            f"- 권장 대응: {action_for(row, category, severity)}",
+            f"- 출처: {' / '.join(u for _, u in row.get('links', []) if u)} (확인일: {check_date})",
             "",
         ]
-
-    if skipped:
-        lines += ["## 참고: 날짜 필터 미지원 소스", ""]
-        lines += [f"- {x}" for x in skipped]
-        lines.append("")
+    lines += ["## 3. 확인할 일"]
+    lines += [f"- {a}" for a in actions_for_rows(ordered)] or ["- 이번 주 바로 할 일 없음(관찰만)"]
+    if notes:
+        lines += ["", "## 참고: 수집 상태", *[f"- {x}" for x in notes]]
     if errors:
-        lines += ["## 수집 오류", ""]
-        lines += [f"- {x}" for x in errors]
-        lines.append("")
+        lines += ["", "## 수집 오류", *[f"- {x}" for x in errors]]
     return "\n".join(lines).strip() + "\n"
 
 
 def build_slack_ci_message(rows: list[dict[str, Any]], date_from: str, date_to: str) -> str:
-    rows = aggregate_rows(rows)
+    ordered = aggregate_rows(rows)
     period = f"{date_from}~{date_to}"
-    detail_url = html_report_url()
-    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    top = sorted(rows, key=lambda r: (severity_rank.get(r.get("severity", "LOW"), 9), r.get("date", "")))[:3]
-
+    counts = {s: sum(1 for r in ordered if r["severity"] == s) for s in SEVERITY_RANK}
     lines = [
         f"📊 *세이브택스 경쟁사 주간 요약*  |  `{period}`",
-        "",
-        "*이번 주 핵심 변화*",
+        f"감지 {len(ordered)}건 · 🚨 높음 {counts['HIGH']} · ⚠️ 보통 {counts['MEDIUM']} · ℹ️ 낮음 {counts['LOW']}" + ("  _(항목별 상세는 스레드 👇)_" if ordered else ""),
     ]
-    if not top:
-        lines.append("- 입력 데이터 기준 확인된 주요 변화 없음")
-    for row in top:
-        severity = row.get("severity", "LOW")
-        icon = "🚨" if severity == "HIGH" else ("⚠️" if severity == "MEDIUM" else "ℹ️")
-        why = textwrap.shorten(impact_for(row, row.get("category", "기타"), severity), width=92, placeholder="...")
-        change = textwrap.shorten(row.get("title", ""), width=72, placeholder="...")
-        evidence = slack_link(first_url(row.get("url", "")), "근거")
-        lines += [
-            f"- {icon} *[{severity}] {row['company']}* · {change}",
-            f"  → {why}",
-            f"  ↳ {evidence}",
-        ]
-
-    actions = []
-    if any("개인정보" in row_text(r) or "처리방침" in row_text(r) for r in rows):
-        actions.append("개인정보/약관 변경 전후 비교")
-    if any("앱 업데이트" in r.get("kind", "") for r in rows):
-        actions.append("최신 앱 플로우 캡처/비교")
-    if any(r.get("category") == "마케팅" for r in rows):
-        actions.append("세무 콘텐츠 키워드·랜딩 보강점 확인")
+    if not ordered:
+        lines += ["", "이번 기간 감지된 변화가 없습니다."]
+    for sev in ["HIGH", "MEDIUM", "LOW"]:
+        group = [r for r in ordered if r["severity"] == sev]
+        if not group:
+            continue
+        lines += ["", f"*{SEVERITY_ICON[sev]} {SEVERITY_KO[sev]}*"]
+        for row in group:
+            head = f"• *{slack_escape(row['company'])}* · {slack_escape(row['title'])}  `{row['category']}`"
+            if sev == "LOW":
+                note = textwrap.shorten(fact_lines(row, limit=1)[0], width=90, placeholder="...")
+                lines.append(f"{head}\n   {slack_escape(date_text(row))} · {slack_escape(note)} · {slack_links(row)}")
+                continue
+            lines.append(head)
+            lines.append(f"   📅 {slack_escape(date_text(row))}")
+            for fact in fact_lines(row, limit=2)[:3]:
+                lines.append(f"   ▸ {slack_escape(textwrap.shorten(fact, width=150, placeholder='...'))}")
+            lines.append(f"   → {slack_escape(impact_for(row, row['category'], sev))}")
+            lines.append(f"   ↳ {slack_links(row)}")
+    quiet = [c for c in COMPETITORS if c not in {r["company"] for r in ordered}]
+    if quiet:
+        lines += ["", f"_변화 없음: {', '.join(quiet)}_"]
+    actions = actions_for_rows(ordered)
     if actions:
-        lines += ["", "*이번 주 권장 액션*"]
-        for action in actions[:3]:
-            lines.append(f"- ✅ {action}")
-    lines += ["", f"🔎 *상세 HTML 리포트:* {slack_link(detail_url, '보기')}"]
-    msg = "\n".join(lines)
-    if len(msg) > 1200:
-        msg = msg[:1130].rstrip() + f"\n\n🔎 *상세 HTML 리포트:* {slack_link(detail_url, '보기')}"
-    return msg
+        lines += ["", "*이번 주 확인할 일*"]
+        lines += [f"• ✅ {slack_escape(a)}" for a in actions[:5]]
+    lines += ["", f"🔎 *상세 리포트:* {slack_link(html_report_url(), '보기')}"]
+    return "\n".join(lines)
+
+
+def build_slack_thread_messages(rows: list[dict[str, Any]], notes: list[str], errors: list[str]) -> list[str]:
+    """스레드 답글: 항목마다 사실 → 바뀐 조항 → 영향 → 대응 → 근거."""
+    ordered = aggregate_rows(rows)
+    out: list[str] = []
+    for idx, row in enumerate(ordered, start=1):
+        sev = row["severity"]
+        hits = (row.get("facts") or {}).get("hits") or []
+        lines = [
+            f"{SEVERITY_ICON[sev]} *{idx}. {slack_escape(row['company'])} · {slack_escape(row['title'])}*",
+            f"구분 `{row['category']}` · {slack_escape(row.get('kind', ''))} · {slack_escape(date_text(row))} · 출처 {slack_escape(row.get('source', ''))}",
+            "",
+            "*무엇이 바뀌었나*",
+            *[f"• {slack_escape(x)}" for x in fact_lines(row, limit=5)],
+        ]
+        if row.get("source_type") == "notice":
+            lines += ["", "*본문 앞부분*", f"> {slack_escape(textwrap.shorten(row.get('summary') or '', width=500, placeholder='...'))}"]
+        if hits:
+            lines.append(f"_감지한 말: {slack_escape(', '.join(hits))}_")
+        lines += [
+            "",
+            f"*우리에게 미치는 영향* {slack_escape(impact_for(row, row['category'], sev))}",
+            f"*권장 대응* {slack_escape(action_for(row, row['category'], sev))}",
+            f"*근거* {slack_links(row)}",
+        ]
+        out.append("\n".join(lines))
+    if notes or errors:
+        status = ["🛠️ *수집 상태*"]
+        status += [f"• {slack_escape(x)}" for x in notes]
+        status += [f"• ❗ {slack_escape(x)}" for x in errors]
+        out.append("\n".join(status))
+    return out
 
 
 def build_period_report(config: dict[str, Any], date_from: str, date_to: str) -> str:
-    rows, skipped, errors = build_competitor_data(config, date_from, date_to)
-    return build_detailed_ci_report(rows, skipped, errors, date_from, date_to)
+    rows, notes, errors, _ = build_competitor_data(config, date_from, date_to)
+    return build_detailed_ci_report(rows, notes, errors, date_from, date_to)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Monitor SaveTax refund competitors and notify changes.")
@@ -1171,6 +1330,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--html-report", type=Path, default=DEFAULT_HTML_REPORT)
     parser.add_argument("--slack-report", type=Path, default=DEFAULT_SLACK_REPORT)
+    parser.add_argument("--slack-thread", type=Path, default=DEFAULT_SLACK_THREAD)
     parser.add_argument("--send-existing", action="store_true", help="Send existing report files without collecting again")
     parser.add_argument("--notify", action="store_true", help="Send Slack/email when changes are detected")
     parser.add_argument("--notify-on-errors", action="store_true", help="Send notifications for fetch errors too")
@@ -1186,24 +1346,31 @@ def main(argv: list[str] | None = None) -> int:
         report = args.report.read_text(encoding="utf-8") if args.report.exists() else ""
         html_report = args.html_report.read_text(encoding="utf-8") if args.html_report.exists() else None
         slack_message = args.slack_report.read_text(encoding="utf-8") if args.slack_report.exists() else report
-        send_slack(slack_message)
+        thread = load_json(args.slack_thread, []) if args.slack_thread.exists() else []
+        send_slack(slack_message, thread)
         send_email(report, html_report)
         return 0
 
     if args.period_from or args.period_to:
         if not (args.period_from and args.period_to):
             raise SystemExit("--period-from and --period-to must be used together")
-        rows, skipped, errors = build_competitor_data(config, args.period_from, args.period_to)
-        report = build_detailed_ci_report(rows, skipped, errors, args.period_from, args.period_to)
-        html_report = build_html_ci_report(rows, skipped, errors, args.period_from, args.period_to)
+        state = load_json(args.state, {"sources": {}})
+        rows, notes, errors, new_state = build_competitor_data(config, args.period_from, args.period_to, state)
+        report = build_detailed_ci_report(rows, notes, errors, args.period_from, args.period_to)
+        html_report = build_html_ci_report(rows, notes, errors, args.period_from, args.period_to)
         slack_message = build_slack_ci_message(rows, args.period_from, args.period_to)
+        slack_thread = build_slack_thread_messages(rows, notes, errors)
         args.report.write_text(report, encoding="utf-8")
         args.html_report.write_text(html_report, encoding="utf-8")
         args.slack_report.write_text(slack_message + "\n", encoding="utf-8")
+        save_json(args.slack_thread, slack_thread)
+        if not args.no_save:
+            save_json(args.state, new_state)
         print(report)
         print("\n--- Slack message preview ---\n" + slack_message)
+        print("\n--- Slack thread preview ---\n" + "\n\n-----\n".join(slack_thread))
         if args.notify:
-            send_slack(slack_message)
+            send_slack(slack_message, slack_thread)
             send_email(report, html_report)
         else:
             print("No notification sent")
