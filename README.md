@@ -2,6 +2,22 @@
 
 삼쩜삼, 덧셈컴퍼니, 비즈넵 환급의 앱/홈페이지/약관/공지 변경을 매주 1회 확인하고 Slack 채널과 이메일로 알림을 보내는 GitHub Actions 기반 모니터입니다.
 
+## 경쟁·규제 뉴스 감시
+
+`.github/workflows/daily-risk-news.yml`은 매일 09:20 KST에 공개 뉴스 검색을 실행하고 새 사건을 `#세무자동화팀-경쟁사분석-레포트`(`C0BEG3NF24C`)에 게시합니다. 기존 주간 앱·홈페이지 변경 리포트와 함께 운영됩니다.
+
+- 삼쩜삼·비즈넵·덧셈·세이브택스 및 세무대리·환급 플랫폼 업계 기사 검색
+- 고발·신고, 조사, 기소·송치, 제재, 판결을 서로 다른 단계로 표시하고 같은 사건의 중복 보도를 묶음
+- 소비자 보호, 광고·수수료, 법안·행정 변화, 신규 서비스·제휴를 수집
+- Bing News·Google News RSS를 기본 사용. `NAVER_CLIENT_ID`·`NAVER_CLIENT_SECRET`(Naver API HUB), `SERPER_API_KEY`를 Secrets에 넣으면 검색 범위가 늘어남
+- Slack 전송에 성공한 사건만 `state/risk_news_state.json`에 기록. 동일한 단계의 보도는 재게시하지 않고 단계 변화는 새 사건으로 게시
+- 일부 뉴스 제공처의 색인·접근 제한 때문에 완전한 기사 수집을 보장하지 않음. 기사 제목과 요약의 자동 분류이므로 중요한 사안은 원문과 공식 발표를 확인
+
+로컬 미리보기: `python risk_news.py --days 30 --all`
+수동 실행: GitHub Actions → Daily tax platform risk news → Run workflow (`days` 1–60)
+
+`SLACK_BOT_TOKEN` 또는 `TA_BOT_TOKEN` Secret이 필요합니다. 봇은 해당 채널에 게시 권한이 있어야 합니다. 새 기사만 게시하며 새 사건이 없을 때는 메시지를 보내지 않습니다.
+
 ## 감시 대상
 
 설정 파일: `sources.json`
