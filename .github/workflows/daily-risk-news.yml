@@ -1,0 +1,56 @@
+name: Daily tax platform risk news
+
+on:
+  # Every day 09:20 KST = 00:20 UTC
+  schedule:
+    - cron: "20 0 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback days (1–60). Existing events stay deduplicated."
+        required: false
+        default: "3"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-risk-news
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Search, deduplicate, and notify
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN || secrets.TA_BOT_TOKEN }}
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          LOOKBACK_DAYS: ${{ inputs.days || '3' }}
+        run: |
+          python -m py_compile risk_news.py
+          python risk_news.py --days "$LOOKBACK_DAYS" --notify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tax-platform-risk-news
+          path: |
+            last_risk_news.md
+            last_risk_slack_message.txt
+            state/risk_news_state.json
+      - name: Save delivered events
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- state/risk_news_state.json last_risk_news.md last_risk_slack_message.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update delivered risk news" -- state/risk_news_state.json last_risk_news.md last_risk_slack_message.txt
+            git pull --rebase
+            git push
+          fi
