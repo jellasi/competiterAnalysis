@@ -1,6 +1,14 @@
 {
   "seeded_from": "https://teamunitblack.slack.com/archives/C0BEG3NF24C/p1795077328881459",
   "seen": {
+    "16faf2fd79da6bfad5c8": {
+      "company": "삼쩜삼",
+      "issue_key": "앱 개편·월세지원센터",
+      "posted_at": "2026-11-21T16:18:56.241918+09:00",
+      "published": "2026-11-20",
+      "stage": "사업 변화",
+      "title_key": "환급중심으로앱전면개편월세계약서ai점검도머니투데이"
+    },
     "1a5722223d3568a27d35": {
       "company": "업계 공통",
       "issue_key": "",
@@ -42,5 +50,5 @@
       "title_key": "환급동선1단계로압축한월세사각지대정조준"
     }
   },
-  "updated_at": "2026-11-20T16:25:37.970601+09:00"
+  "updated_at": "2026-11-21T16:18:56.241918+09:00"
 }
