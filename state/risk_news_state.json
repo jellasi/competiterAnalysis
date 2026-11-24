@@ -1,6 +1,14 @@
 {
   "seeded_from": "https://teamunitblack.slack.com/archives/C0BEG3NF24C/p1795077328881459",
   "seen": {
+    "06da005c2dca25c8e23a": {
+      "company": "세이브택스",
+      "issue_key": "수수료",
+      "posted_at": "2026-11-24T19:00:26.961318+09:00",
+      "published": "2026-11-24",
+      "stage": "사업 변화",
+      "title_key": "횡포무료조회로낚고수수료폭탄안내면통장압류까지"
+    },
     "16faf2fd79da6bfad5c8": {
       "company": "삼쩜삼",
       "issue_key": "앱 개편·월세지원센터",
@@ -58,5 +66,5 @@
       "title_key": "환급동선1단계로압축한월세사각지대정조준"
     }
   },
-  "updated_at": "2026-11-23T16:48:08.310861+09:00"
+  "updated_at": "2026-11-24T19:00:26.961318+09:00"
 }
