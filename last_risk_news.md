@@ -1,8 +1,8 @@
-# 세무플랫폼 경쟁·규제 뉴스 | 2026-11-21~2026-11-24
+# 세무플랫폼 경쟁·규제 뉴스 | 2026-11-22~2026-11-25
 
 검색: 15개 주제 / 기사 사건 1건
 
-## [보통] 세이브택스 · 사업 변화 · [세이브택스 횡포①] '무료 조회'로 낚고 수수료 폭탄…안 내면 통장 압류까지
-- 게시: 2026-11-24 01:00 KST / news.tf.co.kr
-- 근거: https://news.tf.co.kr/read/economy/2392371.htm
-- 내용: 세금 환급 플랫폼 '세이브택스'가 내세운 광고 문구다. 그러나 무료라는 말에 이끌려 서비스를 이용했다가 환급액의 절반에 가까운 수수료를 청구받고, 이를 납부하지 않자 은행 계좌까지 압류당했다는 피해 사례가 다수 제기됐다. 환급액 조회를 앞세워 이용자를 유치한 뒤 고액의 수수료를 청구하고, 미납 시 법적 절차까지 동원하는 영업 방식이 도마에 오른 것이다.
+## [보통] 업계 공통 · 사업 변화 · 페이백스, 1000만달러 유치하고 선물 수수료 환급 플랫폼 출시
+- 게시: 2026-11-25 17:13 KST / 토큰포스트
+- 근거: https://news.google.com/rss/articles/CBMiYEFVX3lxTFBHeE1JZmJ2aC1YVmVPUTFORGVDajYzU3FQWmxQS3dLM0pOaEdMNnBFYUlqalpoS2QyaWljS0Nmb2J3T0s3OXJIaWZabURNTjY4clRmNnNoSU80UnE1NTZwNtIBZkFVX3lxTFA2RzJVX2xRXzlPM0Y5ZU9sdFRTbXdoci1EeXpJQ0FrZFhnRVprVmcwV09weWgwaDFubWJ4cDNWNE9BbThwQWRoYXV6cFFYel9VS3lzb0xfbklaajB2d0VuaVdvMWZkQQ?oc=5
+- 내용: 페이백스, 1000만달러 유치하고 선물 수수료 환급 플랫폼 출시  토큰포스트
